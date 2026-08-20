@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestServer
 from bot.errors import (
     CraftyAPIError,
     CraftyAuthError,
+    CraftyHostOffline,
     CraftyNotFound,
     CraftyUnavailable,
 )
@@ -517,3 +518,28 @@ async def test_error_messages_never_contain_the_token(service, fake_crafty):
     with pytest.raises(CraftyAuthError) as excinfo:
         await service.list_servers(force_refresh=True)
     assert "test-token" not in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# Host gate: Crafty lives on the Azure VM, so a stopped VM means no request
+# --------------------------------------------------------------------------- #
+async def test_no_request_is_sent_while_the_host_is_offline(fake_crafty, crafty_config):
+    host_up = False
+
+    async def host_available() -> bool:
+        return host_up
+
+    svc = CraftyService(
+        replace(crafty_config, url=fake_crafty.url), host_available=host_available
+    )
+    try:
+        with pytest.raises(CraftyHostOffline):
+            await svc.list_servers()
+        assert fake_crafty.calls == []
+        assert await svc.check_connection() is False
+
+        host_up = True
+        assert await svc.list_servers()
+        assert fake_crafty.calls
+    finally:
+        await svc.close()

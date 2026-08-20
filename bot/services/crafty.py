@@ -41,7 +41,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 import aiohttp
 
@@ -50,6 +50,7 @@ from bot.config import CraftyConfig
 from bot.errors import (
     CraftyAPIError,
     CraftyAuthError,
+    CraftyHostOffline,
     CraftyNotFound,
     CraftyUnavailable,
 )
@@ -263,12 +264,17 @@ class CraftyService:
         *,
         session: aiohttp.ClientSession | None = None,
         cache: TTLCache | None = None,
+        host_available: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self._config = config
         self._session = session
         self._owns_session = session is None
         self._cache = cache or TTLCache()
         self._lock = asyncio.Lock()
+        #: Optional predicate telling whether the machine hosting Crafty is up.
+        #: Crafty runs on the Azure VM, so there is no point in waiting for a
+        #: TCP timeout while that VM is deallocated.
+        self._host_available = host_available
 
     # ------------------------------------------------------------------ #
     # Session plumbing
@@ -319,6 +325,7 @@ class CraftyService:
         Only idempotent requests are retried, and the token is passed as a
         header so it can never leak into a URL, a log line or an error message.
         """
+        await self._require_host()
         session = await self._get_session()
         url = f"{self._config.url}{path}"
         headers: dict[str, str] = {}
@@ -361,6 +368,13 @@ class CraftyService:
                     "Crafty %s %s unreachable: %s", method, path, type(exc).__name__
                 )
                 raise CraftyUnavailable() from exc
+
+    async def _require_host(self) -> None:
+        """Refuse to send a request when Crafty's host is known to be down."""
+        if self._host_available is None:
+            return
+        if not await self._host_available():
+            raise CraftyHostOffline()
 
     @staticmethod
     async def _decode(response: aiohttp.ClientResponse) -> Any:

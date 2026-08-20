@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from bot.client import COGS, CraftyBot
-from bot.errors import CraftyUnavailable
+from bot.errors import AzureAuthError, CraftyHostOffline, CraftyUnavailable
+from bot.services.azure import POWER_DEALLOCATED, POWER_RUNNING, VmStatus
 
 EXPECTED_COMMANDS = {
     "status": set(),
@@ -87,3 +88,45 @@ async def test_no_hint_when_azure_is_not_configured(config):
     finally:
         await instance.crafty.close()
         await instance.azure.close()
+
+
+# --------------------------------------------------------------------------- #
+# Crafty runs on the Azure VM: no VM, no Crafty request
+# --------------------------------------------------------------------------- #
+def _vm(power_state: str) -> VmStatus:
+    return VmStatus(name="mc-vm", power_state=power_state)
+
+
+async def test_crafty_is_not_contacted_while_the_vm_is_stopped(bot, monkeypatch):
+    async def stopped(*, use_cache: bool = True) -> VmStatus:
+        return _vm(POWER_DEALLOCATED)
+
+    monkeypatch.setattr(bot.azure, "get_vm_status", stopped)
+    assert await bot.crafty_host_available() is False
+    with pytest.raises(CraftyHostOffline):
+        await bot.crafty.list_servers()
+
+
+async def test_crafty_is_contacted_once_the_vm_runs_or_is_starting(bot, monkeypatch):
+    for state in (POWER_RUNNING, "starting", "unknown"):
+
+        async def status(*, use_cache: bool = True, state=state) -> VmStatus:
+            return _vm(state)
+
+        monkeypatch.setattr(bot.azure, "get_vm_status", status)
+        assert await bot.crafty_host_available() is True
+
+
+async def test_azure_failures_do_not_block_crafty(bot, monkeypatch):
+    async def broken(*, use_cache: bool = True) -> VmStatus:
+        raise AzureAuthError()
+
+    monkeypatch.setattr(bot.azure, "get_vm_status", broken)
+    assert await bot.crafty_host_available() is True
+
+
+async def test_azure_start_only_starts_the_vm_by_default(bot):
+    group = next(c for c in bot.tree.get_commands() if c.name == "azure")
+    start = next(c for c in group.commands if c.name == "start")
+    option = next(p for p in start.parameters if p.name == "start_minecraft")
+    assert option.default is False

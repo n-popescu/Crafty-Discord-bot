@@ -40,8 +40,10 @@ class CraftyBot(commands.Bot):
 
         self.config = config
         self.cache = TTLCache()
-        self.crafty = CraftyService(config.crafty, cache=self.cache)
         self.azure = AzureService(config.azure, cache=self.cache)
+        self.crafty = CraftyService(
+            config.crafty, cache=self.cache, host_available=self.crafty_host_available
+        )
         self.orchestrator = InfraOrchestrator(config, self.crafty, self.azure)
         self.permissions = PermissionChecker(config.permissions, config.guild_id)
         self._idle_task: asyncio.Task[None] | None = None
@@ -49,6 +51,23 @@ class CraftyBot(commands.Bot):
     # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #
+    async def crafty_host_available(self) -> bool:
+        """``False`` while the Azure VM that hosts Crafty is powered off.
+
+        Crafty only exists as long as its VM runs, so every Crafty request is
+        skipped while the VM is stopped or deallocated instead of waiting for a
+        TCP timeout. Transitional states (``starting``, ``unknown``) still get a
+        request: that is what the start workflow polls for. If Azure itself
+        cannot be queried the gate opens, so an Azure outage never hides Crafty.
+        """
+        if not self.azure.enabled:
+            return True
+        try:
+            status = await self.azure.get_vm_status()
+        except BotError:
+            return True
+        return not status.is_stopped
+
     async def setup_hook(self) -> None:
         for extension in COGS:
             await self.load_extension(extension)
@@ -80,10 +99,16 @@ class CraftyBot(commands.Bot):
         crafty_ok, azure_ok = await asyncio.gather(crafty_task, azure_task)
 
         crafty_authenticated = await self.crafty.check_authentication() if crafty_ok else False
+        host_up = await self.crafty_host_available()
 
         logger.info("Startup status:")
         logger.info("  Discord: 🟢 connected as %s", self.user)
-        if not crafty_ok:
+        if not host_up:
+            logger.info(
+                "  Crafty:  ⚪ not checked — the Azure VM %s is powered off",
+                self.azure.vm_name,
+            )
+        elif not crafty_ok:
             logger.warning("  Crafty:  ⚠️ unreachable (%s) — will retry per command", self.crafty.base_url)
         elif not crafty_authenticated:
             logger.warning("  Crafty:  ⚠️ reachable but the API token was rejected")
