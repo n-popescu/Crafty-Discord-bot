@@ -1,7 +1,9 @@
 # Runtime dependencies (Python 3.11+)
 # aiohttp ships with discord.py and is used for the Crafty and Azure REST calls.
 discord.py>=2.4,<3
-aiohttp>=3.9,<4
+# 3.8 is the floor so a Raspberry Pi Zero W can reuse Debian's prebuilt
+# python3-aiohttp package instead of compiling the C extensions on ARMv6.
+aiohttp>=3.8,<4
 python-dotenv>=1.0,<2
 
 # Azure credentials via the official SDK (DefaultAzureCredential).

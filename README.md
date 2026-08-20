@@ -178,8 +178,17 @@ Runtime dependencies: `discord.py`, `aiohttp`, `python-dotenv` and, optionally,
 
 ## Installation on a Raspberry Pi Zero W
 
-The Pi Zero W is an ARMv6 device, so a few packages have no prebuilt wheels.
-Installing them from Debian's repository avoids a multi-hour compile.
+Tested on **Raspberry Pi OS Lite (Bookworm, 32-bit)**, which ships Python 3.11
+and still supports ARMv6. Two things about the Pi Zero W matter before you start:
+
+* It has 512 MB of RAM and one 1 GHz core, so give it swap for the install step:
+  `sudo dphys-swapfile swapoff && sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=512/' /etc/dphys-swapfile && sudo dphys-swapfile setup && sudo dphys-swapfile swapon`
+* It has no real-time clock. HTTPS certificate validation and Azure tokens both
+  fail if the clock is wrong, so make sure time sync is healthy:
+  `timedatectl status` should say *System clock synchronized: yes*.
+
+Because it is an ARMv6 device, a few packages have no prebuilt wheels.
+Installing those from Debian's repository avoids a multi-hour compile.
 
 ```bash
 sudo apt update
@@ -677,6 +686,8 @@ structurally unable to touch a real service.
 | `/server logs` returns nothing | The API key lacks `TERMINAL` (console buffer) or `LOGS` (log file). |
 | `/schedule` says not authorised | The API key lacks `SCHEDULE`. |
 | Everything is slow on the Pi | Normal on first import; check `journalctl -u crafty-bot` and confirm `LOG_LEVEL=INFO`. |
+| Certificate or Azure token errors right after boot | The Pi Zero W has no clock. Check `timedatectl status`; the bot needs the time to be in sync. |
+| `pip` spends an hour compiling `aiohttp` | The virtualenv was created without `--system-site-packages`, so Debian's `python3-aiohttp` is invisible. Recreate it. |
 
 `LOG_LEVEL=DEBUG` logs request paths and status codes (never tokens).
 
