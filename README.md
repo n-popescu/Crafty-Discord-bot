@@ -210,7 +210,7 @@ on ARMv6), install everything else and use service-principal credentials — see
 [Azure authentication on a Pi Zero W](#azure-authentication-on-a-pi-zero-w):
 
 ```bash
-sudo -u craftybot .venv/bin/pip install "discord.py>=2.4,<3" "aiohttp>=3.9,<4" "python-dotenv>=1.0,<2"
+sudo -u craftybot .venv/bin/pip install "discord.py>=2.4,<3" "aiohttp>=3.8,<4" "python-dotenv>=1.0,<2"
 ```
 
 Configure and test:
