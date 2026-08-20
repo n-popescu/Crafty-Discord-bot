@@ -1,4 +1,4 @@
-name: Publish Docker Image
+name: Publish Beta Docker Image
 
 on:
   push:
@@ -16,17 +16,35 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Extract Git tag
       id: get_version
+      env:
+        DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
       run: |
-        TAG=${GITHUB_REF##*/}
-        echo "tag=$TAG" >> $GITHUB_ENV
-        echo "repository=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_ENV"
+        echo "repository=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+        echo "dockerhub_image=${DOCKERHUB_IMAGE:-twoplay/craftybot}" >> "$GITHUB_ENV"
+
+    # DockerHub is optional. Without those credentials the job still publishes to
+    # GHCR instead of failing with "Username and password required".
+    - name: Check for DockerHub credentials
+      id: dockerhub
+      env:
+        DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      run: |
+        if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::DOCKERHUB_USERNAME or DOCKERHUB_TOKEN is not set; publishing to GHCR only."
+        fi
 
     # Docker Login
     - name: Log in to DockerHub
+      if: steps.dockerhub.outputs.enabled == 'true'
       uses: docker/login-action@v3
       with:
         username: ${{ vars.DOCKERHUB_USERNAME }}
@@ -39,36 +57,27 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    # Docker Image Build
+    # Docker Image Build. A beta build never claims the `latest` tag.
     - name: Build and tag Docker image
       run: |
-        IMAGE_NAME="twoplay/craftybot"
-        VERSION=$tag
-        LOWERCASE_REPO=$repository
+        echo "Building ghcr.io/$repository:$tag"
+        docker build -t "ghcr.io/$repository:beta" -t "ghcr.io/$repository:$tag" .
 
-        echo "tag=$tag"
-        echo "Building Docker image $IMAGE_NAME:$VERSION"
-        # Build Image
-        docker build -t $IMAGE_NAME:latest -t $IMAGE_NAME:$VERSION .
-        echo "Tagging Docker image latest"
-        docker tag $IMAGE_NAME:latest ghcr.io/$LOWERCASE_REPO:latest
-        echo "Tagging Docker image $VERSION"
-        docker tag $IMAGE_NAME:$VERSION ghcr.io/$LOWERCASE_REPO:$VERSION
-
-    # Push to DockerHub
-    - name: Push DockerHub image
+    - name: Tag DockerHub image
+      if: steps.dockerhub.outputs.enabled == 'true'
       run: |
-        IMAGE_NAME="twoplay/craftybot"
-        VERSION=$tag
-
-        docker push $IMAGE_NAME:beta
-        docker push $IMAGE_NAME:$VERSION
+        docker tag "ghcr.io/$repository:beta" "$dockerhub_image:beta"
+        docker tag "ghcr.io/$repository:$tag" "$dockerhub_image:$tag"
 
     # Push to GitHub Packages
     - name: Push GitHub image
       run: |
-        VERSION=$tag
-        LOWERCASE_REPO=$repository
+        docker push "ghcr.io/$repository:beta"
+        docker push "ghcr.io/$repository:$tag"
 
-        docker push ghcr.io/$LOWERCASE_REPO:latest
-        docker push ghcr.io/$LOWERCASE_REPO:$VERSION
+    # Push to DockerHub
+    - name: Push DockerHub image
+      if: steps.dockerhub.outputs.enabled == 'true'
+      run: |
+        docker push "$dockerhub_image:beta"
+        docker push "$dockerhub_image:$tag"
