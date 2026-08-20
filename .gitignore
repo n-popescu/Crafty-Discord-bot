@@ -1,11 +1,14 @@
-
 .idea/
+.vscode/
 .env
 env.sh
 
 __pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.pytest_cache/
 /htmlcov/
-
 .coverage
-
 coverage.xml

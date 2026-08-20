@@ -1,6 +1,11 @@
-requests~=2.32.3
-discord~=2.3.2
-python-dotenv~=1.0.1
-coverage~=7.6.4
-flake8~=7.1.1
-pylint~=3.3.1
+# Runtime dependencies (Python 3.11+)
+# aiohttp ships with discord.py and is used for the Crafty and Azure REST calls.
+discord.py>=2.4,<3
+aiohttp>=3.9,<4
+python-dotenv>=1.0,<2
+
+# Azure credentials via the official SDK (DefaultAzureCredential).
+# Optional: on a Raspberry Pi Zero W (ARMv6) `cryptography` has no wheel, so you
+# can skip this line and use service-principal credentials instead -- see the
+# README section "Azure authentication on a Pi Zero W".
+azure-identity>=1.16,<2

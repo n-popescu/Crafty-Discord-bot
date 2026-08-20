@@ -1,320 +1,692 @@
-# Crafty Controller Discord bot
+# Crafty + Azure Discord Control Panel
 
-![GitHub License](https://img.shields.io/github/license/Two-Play/Crafty-Discord-bot)
-![GitHub top language](https://img.shields.io/github/languages/top/Two-Play/Crafty-Discord-bot)
-![GitHub contributors](https://img.shields.io/github/contributors/Two-Play/Crafty-Discord-bot)
-[![Codacy Badge](https://app.codacy.com/project/badge/Grade/d5b3f979005e4c52916f7fb741068483)](https://app.codacy.com/gh/Two-Play/Crafty-Discord-bot/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Codacy Badge](https://app.codacy.com/project/badge/Coverage/d5b3f979005e4c52916f7fb741068483)](https://app.codacy.com/gh/Two-Play/Crafty-Discord-bot/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_coverage)
+A Discord bot that turns a Discord server into a control panel for a Minecraft
+server managed by a **remote [Crafty Controller 4](https://craftycontrol.com)**
+instance, including the lifecycle of the **Azure virtual machine** that hosts it.
 
-## Table of Contents
+The bot itself is designed to run 24/7 on a **Raspberry Pi Zero W**: it is a
+lightweight async API client with no database, no web server and no polling loops.
 
-1. [Introduction](#introduction)
+Forked from [Two-Play/Crafty-Discord-bot](https://github.com/Two-Play/Crafty-Discord-bot)
+and rebuilt around modern slash commands, a service layer and Azure orchestration.
+
+---
+
+## Contents
+
+1. [Architecture](#architecture)
 2. [Features](#features)
-3. [Roadmap](#roadmap)
-4. [Installation](#installation)
-    - [Requirements](#requirements)
-    - [Docker](#docker)
-    - [Python](#python)
-5. [Usage](#usage)
-6. [Issues](#issues)
-7. [Contributing](#contributing)
-8. [Support the Project](#support-the-project)
-9. [Donations](#donations)
-10. [License](#license)
+3. [Command reference](#command-reference)
+4. [Requirements](#requirements)
+5. [Installation on a Raspberry Pi Zero W](#installation-on-a-raspberry-pi-zero-w)
+6. [Discord setup](#discord-setup)
+7. [Crafty setup](#crafty-setup)
+8. [Azure setup](#azure-setup)
+9. [Environment variables](#environment-variables)
+10. [How the orchestration works](#how-the-orchestration-works)
+11. [Permissions model](#permissions-model)
+12. [Security considerations](#security-considerations)
+13. [Resource usage and caching](#resource-usage-and-caching)
+14. [Crafty API coverage](#crafty-api-coverage)
+15. [Development and tests](#development-and-tests)
+16. [Migrating from the original bot](#migrating-from-the-original-bot)
+17. [Troubleshooting](#troubleshooting)
+18. [Credits and licence](#credits-and-licence)
 
-## Introduction
+---
 
-> [!WARNING]
-> This project is still in development and is not yet ready for production use. Please use it at your own risk.
+## Architecture
 
-This is a Discord bot that is designed to control the Crafty-Controller-4 server. This is useful if friends want to
-start a server and you want to control it from Discord.
-The bot is written in Python and uses the Discord.py library to interact with the
-Discord API.
+Crafty is **remote**. Nothing Minecraft-related runs on the Pi; it only talks to
+two HTTPS APIs.
 
-### Features
-
-- **Server Status**: Get the status of the server
-- **Server Start**: Start the server
-- **Server Stop**: Stop the server
-- **Server Restart**: Restart the server
-- **Server List**: Get a list of all servers
-
-## Roadmap
-
-- **Server Backup**: Create a backup of the server
-- **Auto complete (slash commands)**: Auto complete the server ID
-- **Web UI**: Create a web interface for the bot
-
-## Installation
-
-To install the bot, you will need to have a few things set up first.
-
-### Requirements
-
-#### Server
-
-You should have a Server to deploy this bot. You can use a VPS, local server or a Raspberry Pi.
-You can also use your own computer, but it is not recommended for availability reasons.
-
-#### Crafty Controller user
-
-You will need to create a new user (recommended) on the Crafty Controller
-server and obtain the user token. You can do this by following these steps:
-
-1. Go to your Crafty Controller server
-2. Click on the gear icon in the top right corner
-3. Click on "add user" and enter a name for your user (for example, "Crafty Bot")
-4. Fill in the required fields, select the desired permissions and click on "Save"
-5. Click on the pencil icon next to the user you just created
-6. Click on "API Key" and select the following permissions:
-    - COMMANDS
-    - TERMINAL
-    - PLAYERS
-7. Enter a name for your user token (for example, "Crafty Bot Token")
-8. Click on "Create" to generate the user token
-9. Save your user token in a safe place (you will need it later)
-
-#### Discord Bot
-
-You will need to create a new Discord bot and obtain a bot token. You can do this by following these steps:
-
-> [!IMPORTANT]  
-> I don't know if the permissions are correct, but you can try it out. If it doesn't work, please let me know.
-> You can also use the "ALL" permission, but this is not recommended for security reasons.
-
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click on "New Application"
-3. Enter a name for your bot (for example, "Crafty Bot")
-4. Accept the terms and click on "Create"
-5. If you want to add an icon to your bot, click on "General Information" in the left-hand menu and then click on "
-   Upload Image" under "App Icon"
-6. Click on "Bot" in the left-hand menu
-7. Under "username", you can change the name of your bot if you wish
-8. Enable "Presence Intent", "Server Members Intent" and "Message Content Intent"
-9. Disable the "Public Bot" option
-10. Click on "Reset Token" and confirm by clicking on "Yes, do it!"
-11. "Copy" under "Token" to copy your bot token
-12. Save your bot token in a safe place (you will need it later)
-13. Click on "OAuth2" in the left-hand menu
-14. Under "Scopes", select "bot"
-15. Under "Bot Permissions", select
-    - View Channels
-    - Send Messages
-    - Create public threads
-    - Use slash commands
-    - Read Message History
-    - Mention Everyone
-16. Click on "Copy" under "OAuth2 URL" to copy the invite URL
-17. Paste the invite URL into your web browser
-18. Select the server you want to invite the bot to
-19. Click on "Authorize"
-
-Congratulations! Your bot has been invited to your server
-
-### Docker
-
-Installing the bot using Docker is the easiest way to get started. To do this, you will need to have Docker installed on
-your system. If you do not have Docker installed, you can download it from
-the [official Docker website](https://www.docker.com/get-started).
-
-
-> [!IMPORTANT]
-> Replace `YOUR_DISCORD_TOKEN` with your Discord bot token, `YOUR_CRAFTY_TOKEN` with your Crafty Controller API token
-> and `YOUR_CRAFTY_SERVER_URL` with the URL of your Crafty Controller server in
-> the following format: `https://your-crafty-server-IP:PORT`.
-
-To install the bot using Docker, you will need to run the following command in your terminal:
-
-```bash
-docker run -d --name crafty-bot -e DISCORD_TOKEN=YOUR_DISCORD_TOKEN -e CRAFTY_TOKEN=YOUR_CRAFTY_TOKEN -e SERVER_URL=YOUR_CRAFTY_SERVER_URL twoplay/craftybot:latest
+```
+Raspberry Pi Zero W                    Azure VM (e.g. West Europe)
+┌────────────────────────┐             ┌────────────────────────────────┐
+│  Discord bot           │             │  Crafty Controller 4.x         │
+│                        │  HTTPS      │    └── Minecraft server (Paper)│
+│  ├── CraftyService ────┼────────────▶│      REST API :8443            │
+│  ├── AzureService  ────┼───┐         └────────────────────────────────┘
+│  └── Orchestrator      │   │  HTTPS (management.azure.com)
+└────────────────────────┘   └────────▶ Azure Resource Manager
+            ▲                            (start / deallocate / status)
+            │ WebSocket (Discord gateway)
+     Discord users
 ```
 
-Or you can use the following `docker-compose.yml` file:
+Layering (each arrow is the only way to cross the boundary):
 
-```yaml
-services:
-  crafty-bot:
-    image: twoplay/craftybot:latest
-    container_name: crafty-bot
-    environment:
-      - DISCORD_TOKEN=YOUR_DISCORD_TOKEN
-      - CRAFTY_TOKEN=YOUR_CRAFT
-      - SERVER_URL=YOUR_CRAFTY_SERVER_URL
-    restart: unless-stopped
+```
+Discord slash command / button
+        ↓
+  cog (bot/cogs/…)          – validates permissions, renders embeds
+        ↓
+  orchestrator              – sequences multi-step workflows
+        ↓
+  CraftyService / AzureService  – async HTTP, retries, typed errors
+        ↓
+  Crafty v2 API / Azure Resource Manager
 ```
 
-### Python
+Because every Crafty detail is confined to `bot/services/crafty.py`, a future
+Crafty API change touches exactly one file.
 
-If you would like to install the bot using Python, you will need to have Python 3.8 or higher installed on your system.
-
-Clone the repository
-
-```bash
-git clone https://github.com/Two-Play/Crafty-Discord-bot.git
+```
+bot/
+├── __main__.py        entrypoint (python -m bot)
+├── client.py          Discord client, startup validation, error surface
+├── config.py          environment parsing and validation
+├── permissions.py     three configurable permission tiers
+├── cache.py           tiny TTL cache with single-flight requests
+├── tasks.py           optional idle watcher (disabled by default)
+├── errors.py          typed, user-safe exceptions
+├── utils.py           logging (with secret scrubbing), formatting, backoff
+├── services/
+│   ├── crafty.py      Crafty Controller v2 API client
+│   ├── azure.py       Azure ARM client + credential provider
+│   └── orchestrator.py Azure ↔ Crafty workflows
+├── ui/
+│   ├── embeds.py      reusable embed builders
+│   └── views.py       buttons, confirmations, select menus
+└── cogs/              status, server, azure, minecraft, schedule
 ```
 
-Change into the project directory
+---
 
-```bash
-cd Crafty-Discord-bot
+## Features
+
+* **`/status`** — one embed with the Minecraft state, player count, version,
+  uptime, CPU/RAM/disk and the Azure VM power state, with
+  `🔄 Refresh` / `▶ Start` / `⏹ Stop` / `🔃 Restart` buttons that edit the same
+  message instead of spamming the channel.
+* **Graceful shutdown** — the VM is never deallocated while Minecraft is running
+  unless an administrator explicitly forces it.
+* **Live progress** — start/stop workflows update a single message step by step
+  (`Azure VM → Crafty → Minecraft`) using exponential-backoff polling, never
+  fixed sleeps.
+* **Console access** — `/server command`, with a confirmation button for
+  dangerous commands such as `stop` or `ban`.
+* **Logs, players, backups, scheduler** — everything the Crafty v2 API actually
+  supports, and nothing it does not.
+* **Granular permissions** — read-only for everyone, Minecraft control for a
+  role, Azure control for another, destructive actions for administrators.
+* **Fails soft** — if Crafty is unreachable the bot still starts, still answers,
+  and tells you the VM's power state (which is usually the reason).
+
+---
+
+## Command reference
+
+| Command | Tier | What it does |
+| --- | --- | --- |
+| `/status [server]` | everyone | Full infrastructure overview with action buttons |
+| `/health` | everyone | Which layer is broken: bot, Crafty, Azure or Minecraft (ephemeral) |
+| `/server status [server]` | everyone | Detailed server statistics |
+| `/server players [server]` | everyone | Online players, with UUIDs when Crafty reports them |
+| `/server info [server]` | everyone | Server configuration (type, address, autostart, …) |
+| `/server resources` | everyone | CPU/RAM/disk of the Crafty host (i.e. the VM) |
+| `/server logs [lines] [source] [server]` | server | Last log lines from the console buffer or `latest.log` (ephemeral) |
+| `/server start [server]` | server | Start Minecraft (starts the VM first if needed) |
+| `/server stop [server] [shutdown_vm]` | server (+azure for `shutdown_vm`) | Graceful stop, optionally deallocating the VM |
+| `/server restart [server]` | server | Restart through Crafty |
+| `/server command command:<text> [server]` | server | Send a console command; dangerous ones ask for confirmation |
+| `/server backup [server]` | server | Run a Crafty backup configuration |
+| `/server backups [server]` | server | List backup configurations |
+| `/server kill [server]` | admin | Force-kill a frozen server (asks for confirmation) |
+| `/azure status` | everyone | VM power state, region, size, public IP |
+| `/azure ip` | everyone | Public and private IP addresses |
+| `/azure start [start_minecraft] [server]` | azure | Start the VM, wait for Crafty, then start Minecraft |
+| `/azure stop [force] [server]` | azure (`force`: admin) | Stop Minecraft, then deallocate the VM (asks for confirmation) |
+| `/azure restart [server]` | admin | Stop Minecraft, then reboot the VM |
+| `/minecraft start [server]` | server (+azure if the VM is down) | Bring the whole stack up |
+| `/minecraft stop [shutdown_vm] [server]` | server (+azure for `shutdown_vm`) | Stop Minecraft, optionally the VM too |
+| `/minecraft restart [server]` | server | Restart, starting the VM if necessary |
+| `/schedule info task_id:<n> [server]` | server | Show one Crafty scheduled task |
+| `/schedule run task_id:<n> [cascade] [server]` | server | Run a Crafty task now, optionally cascading its chain |
+
+Every command with a `server` option autocompletes the servers your Crafty API
+key can see, so multiple Crafty servers work out of the box.
+
+Examples:
+
+```
+/status
+/server command command:say Hello from Discord!
+/server logs lines:30 source:Server log file (latest.log)
+/minecraft start
+/minecraft stop shutdown_vm:true
+/azure stop force:true
+/schedule run task_id:4 cascade:true
 ```
 
-Create a virtual environment
+---
+
+## Requirements
+
+| Component | Requirement |
+| --- | --- |
+| Bot host | Raspberry Pi Zero W (512 MB RAM) or anything larger |
+| Python | **3.11+** (Raspberry Pi OS Bookworm ships 3.11) |
+| Crafty | Crafty Controller **4.x** reachable over HTTP(S) — verified against 4.10.8 |
+| Azure | A VM plus credentials that may read it and start/stop it (optional) |
+| Discord | A bot application; **no privileged intents required** |
+
+Runtime dependencies: `discord.py`, `aiohttp`, `python-dotenv` and, optionally,
+`azure-identity`. No database, no Redis, no web framework.
+
+---
+
+## Installation on a Raspberry Pi Zero W
+
+The Pi Zero W is an ARMv6 device, so a few packages have no prebuilt wheels.
+Installing them from Debian's repository avoids a multi-hour compile.
 
 ```bash
-python -m venv venv
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git \
+                    python3-aiohttp python3-cryptography
+
+sudo useradd --system --create-home --home-dir /opt/crafty-bot craftybot
+sudo -u craftybot git clone https://github.com/n-popescu/Crafty-Discord-bot.git /opt/crafty-bot
+cd /opt/crafty-bot
+
+# --system-site-packages reuses the apt-installed aiohttp/cryptography builds.
+sudo -u craftybot python3 -m venv --system-site-packages .venv
+sudo -u craftybot .venv/bin/pip install --upgrade pip
+sudo -u craftybot .venv/bin/pip install -r requirements.txt
 ```
 
-Activate the virtual environment
-On Linux and macOS:
+If `azure-identity` fails to build (it pulls in `cryptography`, which needs Rust
+on ARMv6), install everything else and use service-principal credentials — see
+[Azure authentication on a Pi Zero W](#azure-authentication-on-a-pi-zero-w):
 
 ```bash
-source venv/bin/activate
+sudo -u craftybot .venv/bin/pip install "discord.py>=2.4,<3" "aiohttp>=3.9,<4" "python-dotenv>=1.0,<2"
 ```
 
-On Windows:
+Configure and test:
 
 ```bash
-venv\Scripts\activate
+sudo -u craftybot cp .env.example .env
+sudo -u craftybot nano .env          # fill in the values
+sudo chmod 600 .env                  # the file contains secrets
+sudo -u craftybot .venv/bin/python -m bot   # Ctrl+C once the startup report looks right
 ```
 
-Download the required dependencies
+A healthy start looks like this:
 
-```bash
-pip install -r requirements.txt
+```
+Starting Crafty Control Panel bot
+Crafty URL: https://crafty.example.com (TLS verification: True)
+Azure VM: mc-vm (resource group mc-rg)
+Registered 6 slash commands in guild 123456789012345678
+Startup status:
+  Discord: 🟢 connected as CraftyPanel#1234
+  Crafty:  🟢 connected (https://crafty.example.com)
+  Azure:   🟢 authenticated (VM mc-vm)
 ```
 
-To run the bot, you will need to copy the `.env.example` file to a new file called `.env` and fill in the required
-fields.
-Only the `DISCORD_TOKEN` and `CRAFTY_TOKEN` fields are required to run the bot. If you want to use slash commands, you
-will need to fill in the `GUILD_ID` field as well.
+Install the service:
 
 ```bash
-
-Start the bot
-```bash
-cd core
-python main.py
+sudo cp deploy/crafty-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now crafty-bot
+journalctl -u crafty-bot -f
 ```
 
-Replace `YOUR_DISCORD_TOKEN` with your Discord bot token and `CRAFTY_TOKEN` with your Crafty Controller API token.
+The unit file restarts the bot on failure, caps memory at 200 MB and reads the
+environment from `/opt/crafty-bot/.env`.
 
-#### Update
+> **Docker** is available (`docker build -t crafty-bot .`) but is not recommended
+> on a Pi Zero W: the container runtime costs more memory than the bot itself.
 
-For updating the bot, you can use the following command:
+---
+
+## Discord setup
+
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications)
+   → **New Application**.
+2. **Bot** → **Reset Token** → copy the token into `DISCORD_TOKEN`.
+3. Leave **all privileged intents off**. The bot uses slash commands only and
+   never reads message content.
+4. **OAuth2 → URL Generator**: scopes `bot` and `applications.commands`; bot
+   permissions only need **Send Messages** and **Embed Links** (the bot replies
+   to interactions, so even those are mostly a convenience). Invite the bot with
+   the generated URL.
+5. Enable **Developer Mode** in Discord (*Settings → Advanced*) so you can
+   right-click to *Copy ID* for the server, roles and users.
+6. Put your server's ID in `DISCORD_GUILD_ID`. Commands then appear instantly and
+   the bot rejects interactions coming from anywhere else. Leaving it empty
+   publishes the commands globally, which can take up to an hour to propagate.
+
+Slash commands are registered automatically on every start, so there is no
+`>sync` command to run.
+
+---
+
+## Crafty setup
+
+### 1. Create an API key
+
+In the Crafty panel: **Panel → Users → your user → API Keys → Create new API
+Token**. Give the key only the permissions the bot needs:
+
+| Crafty permission | Needed for |
+| --- | --- |
+| `COMMANDS` | `/server start`, `stop`, `restart`, `kill`, `/server command`, backups trigger |
+| `TERMINAL` | `/server logs` (console buffer) |
+| `LOGS` | `/server logs source:Server log file` |
+| `BACKUP` | `/server backup`, `/server backups` |
+| `SCHEDULE` | `/schedule info`, `/schedule run` |
+| `PLAYERS` | reserved for future player commands |
+
+Leave **Full Access** off, and prefer a dedicated Crafty user that can only see
+the servers the bot should manage. Copy the token into `CRAFTY_API_TOKEN`; it is
+shown once.
+
+`/server resources` reads `GET /api/v2/crafty/stats`, which is available to any
+authenticated user.
+
+### 2. Find the server ID
+
+Open the server in the Crafty panel and copy the UUID from the URL
+(`/panel/server_detail?id=<uuid>`), or simply start the bot and use the
+autocomplete on any `server` option. Set `CRAFTY_SERVER_ID` to make one server
+the default; with a single visible server you can leave it empty.
+
+### 3. Make Crafty reachable
+
+The bot needs HTTPS access to Crafty's API port (`8443` by default).
+
+* **Recommended:** put Crafty behind a reverse proxy with a trusted certificate
+  (`CRAFTY_URL=https://crafty.example.com`, `CRAFTY_VERIFY_SSL=true`). See the
+  [Crafty reverse-proxy guide](https://docs.craftycontrol.com/pages/getting-started/proxies/).
+* **Direct exposure:** open `8443` in the Azure network security group,
+  restricted to the Pi's public IP if it is static.
+* **VPN / Tailscale (no public exposure):** install Tailscale on both the VM and
+  the Pi and use the private address, e.g.
+  `CRAFTY_URL=https://100.101.102.103:8443`. Crafty's own certificate is
+  self-signed in that case, so set `CRAFTY_VERIFY_SSL=false`. The traffic is
+  still encrypted by the VPN. This is the safest option if you would rather not
+  expose Crafty at all.
+
+---
+
+## Azure setup
+
+### 1. Gather the identifiers
 
 ```bash
-# Change into the project directory and pull the latest changes
-cd Crafty-Discord-bot
-git pull
+az account show --query id -o tsv                 # AZURE_SUBSCRIPTION_ID
+az vm list -o table                               # AZURE_RESOURCE_GROUP, AZURE_VM_NAME
 ```
 
-## Usage
+### 2. Create a service principal with least privilege
 
-### Slash Commands (Beta)
+Create a custom role limited to reading the VM and switching it on and off —
+this is narrower than the built-in *Virtual Machine Contributor*, which can also
+delete and reconfigure VMs.
 
-To use slash commands, you will need to set the `GUILD_ID` in the `.env` file. You can get the `GUILD_ID` by enabling
-the `Developer Mode` in Discord and right-clicking on the server name.
+`minecraft-vm-operator.json`:
 
-To get the slash commands, enter the following command:
+```json
+{
+  "Name": "Minecraft VM Operator",
+  "IsCustom": true,
+  "Description": "Read a VM and start/stop/restart it. No create, delete or resize.",
+  "Actions": [
+    "Microsoft.Compute/virtualMachines/read",
+    "Microsoft.Compute/virtualMachines/instanceView/read",
+    "Microsoft.Compute/virtualMachines/start/action",
+    "Microsoft.Compute/virtualMachines/deallocate/action",
+    "Microsoft.Compute/virtualMachines/powerOff/action",
+    "Microsoft.Compute/virtualMachines/restart/action",
+    "Microsoft.Network/networkInterfaces/read",
+    "Microsoft.Network/publicIPAddresses/read"
+  ],
+  "NotActions": [],
+  "DataActions": [],
+  "NotDataActions": [],
+  "AssignableScopes": ["/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>"]
+}
+```
 
 ```bash
-  >clear
-  >commands
-  >sync
+SUB=<SUBSCRIPTION_ID>
+RG=<RESOURCE_GROUP>
+VM=<VM_NAME>
+
+az role definition create --role-definition @minecraft-vm-operator.json
+
+# Scope the assignment to the single VM, not the whole resource group.
+az ad sp create-for-rbac \
+  --name "crafty-discord-bot" \
+  --role "Minecraft VM Operator" \
+  --scopes "/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Compute/virtualMachines/$VM"
 ```
 
-Hopefully, the bot will know the commands. It is still in beta, so it may not work as expected.
+The output maps to the environment as follows:
 
-The bot supports slash commands. To use the slash commands, you will need to have the `Use slash commands` permission
-enabled for the bot.
+| `az` output | Variable |
+| --- | --- |
+| `tenant` | `AZURE_TENANT_ID` |
+| `appId` | `AZURE_CLIENT_ID` |
+| `password` | `AZURE_CLIENT_SECRET` |
+
+The network permissions are only needed for `/azure ip` and the public IP shown
+in `/azure status`; drop them if you do not want them.
+
+If you prefer a built-in role, **Virtual Machine Contributor** scoped to the
+single VM also works — it is simply broader than necessary.
+
+### 3. Azure authentication on a Pi Zero W
+
+`AzureService` obtains tokens through
+`azure.identity.aio.DefaultAzureCredential` when `azure-identity` is installed,
+which supports environment variables, managed identity, the Azure CLI and
+Workload Identity.
+
+`azure-identity` depends on `cryptography`, which has no ARMv6 wheel. Two ways
+around that:
+
+* install `python3-cryptography` from apt and create the virtualenv with
+  `--system-site-packages` (the [installation](#installation-on-a-raspberry-pi-zero-w)
+  steps do this), or
+* skip `azure-identity` entirely: with `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and
+  `AZURE_CLIENT_SECRET` set, the bot performs the standard OAuth2
+  client-credentials flow itself over `aiohttp`.
+
+Either way the VM is driven through the Azure Resource Manager REST API rather
+than the generated `azure-mgmt-compute` client, which keeps memory use low, and
+the Azure CLI is never invoked as a subprocess.
+
+---
+
+## Environment variables
+
+Copy `.env.example` to `.env`. Missing required values are reported by name at
+startup — never by value.
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `DISCORD_TOKEN` | ✅ | — | Discord bot token |
+| `DISCORD_GUILD_ID` | | — | Register commands in (and accept them from) one guild |
+| `CRAFTY_URL` | ✅ | — | Base URL of the remote Crafty instance |
+| `CRAFTY_API_TOKEN` | ✅ | — | Crafty API key |
+| `CRAFTY_VERIFY_SSL` | | `true` | Verify Crafty's TLS certificate |
+| `CRAFTY_TIMEOUT` | | `10` | Per-request timeout in seconds |
+| `CRAFTY_SERVER_ID` | | — | Default server for commands without `server` |
+| `AZURE_SUBSCRIPTION_ID` | | — | Enables `/azure` when set with the next two |
+| `AZURE_RESOURCE_GROUP` | | — | Resource group of the VM |
+| `AZURE_VM_NAME` | | — | VM name |
+| `AZURE_TENANT_ID` | | — | Service principal tenant |
+| `AZURE_CLIENT_ID` | | — | Service principal application ID |
+| `AZURE_CLIENT_SECRET` | | — | Service principal secret |
+| `AZURE_TIMEOUT` | | `30` | Azure request timeout in seconds |
+| `ADMIN_USER_IDS` | | — | Users who may do everything |
+| `ADMIN_ROLE_IDS` | | — | Roles who may do everything |
+| `SERVER_CONTROL_ROLE_IDS` | | — | Roles that may control Minecraft |
+| `AZURE_CONTROL_ROLE_IDS` | | — | Roles that may control the VM |
+| `AUTO_SHUTDOWN_VM` | | `false` | Deallocate the VM after Minecraft stops |
+| `AUTO_SHUTDOWN_DELAY` | | `300` | Grace period before deallocating (seconds) |
+| `IDLE_SHUTDOWN_ENABLED` | | `false` | Stop an empty server automatically |
+| `IDLE_SHUTDOWN_MINUTES` | | `30` | Minutes without players before stopping |
+| `IDLE_CHECK_INTERVAL` | | `900` | Seconds between idle checks |
+| `STATUS_CACHE_TTL` | | `10` | Seconds a status reading may be reused |
+| `START_TIMEOUT` | | `600` | Upper bound for start workflows (seconds) |
+| `STOP_TIMEOUT` | | `300` | Upper bound for stop workflows (seconds) |
+| `LOG_LEVEL` | | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+
+---
+
+## How the orchestration works
+
+### Starting (`/minecraft start`, `/azure start`, `/status ▶`)
+
+```
+Is the VM running?  ──no──▶ POST …/start
+                              ↓ poll instanceView (backoff 5s → 20s)
+                            PowerState/running
+                              ↓
+                            poll GET /api/v2/crafty/check  (Crafty booting)
+                              ↓
+Is Minecraft running? ─no──▶ POST …/action/start_server
+                              ↓ poll GET …/stats until running
+                            ✅ ready
+```
+
+Each arrow updates the same Discord message. Nothing sleeps for a fixed period:
+every wait is a poll with exponential backoff and a hard timeout
+(`START_TIMEOUT`).
+
+### Stopping (`/azure stop`)
+
+```
+VM already stopped? ──yes──▶ report and finish
+        │no
+        ▼
+Minecraft running? ──yes──▶ POST …/action/stop_server
+        │                     ↓ poll …/stats until running == false
+        │                   (timeout ⇒ abort, VM stays up)
+        ▼
+POST …/deallocate  ──▶ poll until deallocated ──▶ ✅ billing stopped
+```
+
+Guarantees:
+
+* The VM is **never** deallocated while Minecraft is running, unless an
+  administrator passes `force:true`.
+* If Crafty cannot confirm the shutdown, the workflow **aborts and leaves the VM
+  running** rather than risking world corruption; the embed says so explicitly.
+* Every destructive path is behind a confirmation button.
+
+### Automatic shutdown
+
+`AUTO_SHUTDOWN_VM=true` makes `/server stop` and `/minecraft stop` continue into
+`wait until Minecraft stopped → wait AUTO_SHUTDOWN_DELAY → deallocate`. With the
+default `false`, stopping Minecraft never touches the VM.
+
+`IDLE_SHUTDOWN_ENABLED=true` additionally starts one background task that wakes
+up every `IDLE_CHECK_INTERVAL` seconds (15 minutes by default), makes a single
+API call, and stops a server that has had no players for
+`IDLE_SHUTDOWN_MINUTES`. It respects `AUTO_SHUTDOWN_VM` for the VM.
+
+---
+
+## Permissions model
+
+| Tier | Who qualifies | Commands |
+| --- | --- | --- |
+| **everyone** | anyone who can use the bot | `/status`, `/health`, `/server status/players/info/resources`, `/azure status`, `/azure ip` |
+| **server** | `SERVER_CONTROL_ROLE_IDS` + admins | start/stop/restart, console commands, logs, backups, scheduler |
+| **azure** | `AZURE_CONTROL_ROLE_IDS` + admins | VM start/stop/deallocate |
+| **admin** | `ADMIN_USER_IDS`, `ADMIN_ROLE_IDS`, Discord Administrators, guild owner | `/server kill`, `/azure restart`, `/azure stop force:true` |
+
+If a tier has no roles configured it stays **admin-only**, so a fresh install is
+locked down rather than open. Refusals are always ephemeral, and buttons the
+caller may not use are not shown.
+
+---
+
+## Security considerations
+
+* **Secrets stay in the environment.** Nothing is hard-coded, and `.env` should
+  be `chmod 600`.
+* **Tokens are never rendered.** They are sent as `Authorization` headers only —
+  never in a URL, an embed, an error message or an exception. Tests assert this.
+* **Logs are scrubbed.** A logging filter redacts bearer tokens and
+  `client_secret`/`token`/`code` query parameters even if one slips through.
+* **Error bodies are not echoed.** Azure token failures log the error *code*
+  only, because the response can contain the request payload.
+* **Least privilege.** A custom Azure role that can only read and power-cycle one
+  VM; a Crafty API key with only the permission bits the bot uses.
+* **Guild pinning.** `DISCORD_GUILD_ID` restricts both command registration and
+  which guild's interactions are accepted.
+* **No privileged intents.** The bot cannot read message content, and it uses no
+  prefix commands.
+* **Confirmation gates** on `/azure stop`, `/azure restart`, `/server kill` and
+  dangerous console commands; `force` is administrator-only.
+* **No local execution.** The Pi never runs Minecraft, Crafty or the Azure CLI:
+  there is no subprocess and no shell in the code path, so there is nothing to
+  inject into.
+* **No large downloads.** Backups stay on the Crafty host; the bot only triggers
+  and reports them.
+
+---
+
+## Resource usage and caching
+
+Choices that matter on a 512 MB, single-core ARMv6 board:
+
+* Slash commands only, `Intents.none()` plus guilds — no member or message cache.
+* One `aiohttp` session per service with at most four connections, created lazily
+  and closed on shutdown.
+* No background polling by default. Crafty is queried when a command asks for it;
+  the only optional background task is the idle watcher.
+* Short-lived caches, sized so `/status` is never misleading:
+
+  | Data | TTL |
+  | --- | --- |
+  | Server list (autocomplete) | 60 s |
+  | Server configuration | 5 min |
+  | Server statistics | `STATUS_CACHE_TTL` (10 s) |
+  | Azure VM metadata (region, size, NIC) | 5 min |
+  | Azure power state | 5 s, bypassed before every write |
+  | Azure public IP | 60 s |
+
+  Concurrent requests for the same key share one HTTP call, and any write
+  invalidates the affected entries immediately.
+* Progress edits are throttled to one per 1.5 s.
+* No database, no ORM, no web server, no Prometheus scraping, no browser.
+
+---
+
+## Crafty API coverage
+
+Researched against the [official v2 API reference](https://docs.craftycontrol.com/pages/developer-guide/api-reference/v2/)
+and cross-checked with the Crafty **4.10.8** source, because the published
+OpenAPI document is outdated in places.
+
+**Used**
+
+| Endpoint | Used by |
+| --- | --- |
+| `GET /api/v2/crafty/check` | connectivity probe, `/health`, start workflow |
+| `GET /api/v2/crafty/stats` | `/server resources`, `/status` |
+| `GET /api/v2/servers` | autocomplete, server resolution |
+| `GET /api/v2/servers/{id}` | `/server info` |
+| `GET /api/v2/servers/{id}/stats` | `/status`, `/server status`, `/server players` |
+| `POST /api/v2/servers/{id}/action/{action}` | start, stop, restart, kill, `backup_server/{backup_id}` |
+| `POST /api/v2/servers/{id}/stdin` | `/server command` |
+| `GET /api/v2/servers/{id}/logs` | `/server logs` (`?file=true` for the log file) |
+| `GET /api/v2/servers/{id}/backups` | `/server backups`, default-backup lookup |
+| `GET /api/v2/servers/{id}/tasks/{taskId}` | `/schedule info` |
+| `POST /api/v2/servers/{id}/tasks/{taskId}/run` | `/schedule run` (with `cascade` for task chains) |
+
+**Deliberately not used**
+
+* `GET /api/v2/servers/{id}/tasks` and `/tasks/{id}/children` — stub handlers in
+  4.10.8 (`def get(...): pass`), so schedules cannot be listed over the API. The
+  bot exposes `/schedule info` and `/schedule run` with the task ID from the
+  panel instead of faking a list.
+* **Console WebSocket** — authenticates with a browser cookie rather than an API
+  key, and would require a permanently open connection. `/server logs` reads the
+  same buffer over HTTP on demand, which is cheaper on a Pi Zero W.
+* **File manager, user/role management, server creation and deletion, config
+  patching, webhooks** — powerful and destructive, with no natural Discord UX.
+  They are intentionally out of scope; use the Crafty panel.
+* **`/metrics` (Prometheus)** — the bot is not a monitoring system.
+
+Quirks handled inside `CraftyService` so the rest of the code never sees them:
+
+* `/stats` nests everything under `data` (the spec shows it flat) — both shapes
+  are accepted.
+* Unknown values come back as `False` or `"False"`; they become `None` and render
+  as `N/A`. A genuine `0` (zero players, 0 % CPU) is preserved.
+* `players` is a text column holding a Python `repr` or JSON list — parsed
+  safely, never `eval`-ed.
+* `GET …/backups` returns a mapping keyed by backup ID with no `status` envelope.
+* Permission failures arrive as HTTP 400 with `error: NOT_AUTHORIZED`, and some
+  failures arrive as HTTP 200 with `status: error`; both map to typed exceptions.
+
+---
+
+## Development and tests
 
 ```bash
-  /help
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-### Command (>)
+130 tests, roughly two seconds, **no network access**:
 
-Enter the following command to get a list of available commands:
+* `test_crafty_service.py` — status/start/stop/restart/players/console/logs/
+  backups/scheduler, response-shape quirks, retries, and every error class
+  (timeout, connection refused, 401/403/404/500, `status: error`, bad JSON),
+  including an assertion that the token never appears in an error.
+* `test_azure_service.py` — power state, IP lookup, start/deallocate/powerOff/
+  restart, waiting, API versions, error mapping, and the credential provider
+  (service-principal flow, caching, rejected credentials).
+* `test_orchestrator.py` — the two headline scenarios
+  (`Azure stopped → /minecraft start → …` and
+  `Minecraft running → /azure stop → …`), plus forced stops, refusing to
+  deallocate when Crafty is down, and degraded snapshots.
+* `test_config.py`, `test_ui.py`, `test_bot.py` — configuration validation,
+  permission tiers, caching, formatting, embeds and the registered command tree.
 
-```bash
-  >help
-```
+Crafty and Azure are simulated by local `aiohttp` applications built from the
+real response shapes, so the tests exercise genuine HTTP behaviour while being
+structurally unable to touch a real service.
 
-To get the status of the server, enter the following command:
+---
 
-```bash
-  >status
-```
+## Migrating from the original bot
 
-To start the server, enter the following command:
+* Prefix commands (`>start`, `>stats`, `>sync`, …) are gone; everything is a
+  slash command, registered automatically at startup.
+* The entrypoint is `python -m bot` instead of `python core/main.py`.
+* Environment variables were renamed for clarity:
 
-```bash
-  >start [server_id]
-```
+  | Old | New |
+  | --- | --- |
+  | `SERVER_URL` | `CRAFTY_URL` |
+  | `CRAFTY_TOKEN` | `CRAFTY_API_TOKEN` |
+  | `GUILD_ID` | `DISCORD_GUILD_ID` |
+  | `ENABLE_AUTO_STOP_SERVER` | `IDLE_SHUTDOWN_ENABLED` |
+  | `AUTO_STOP_SLEEP_TIME` | `IDLE_CHECK_INTERVAL` |
 
-replace `[server_id]` with the ID of the server you want to start. You can get the server ID by entering the `>list`
-command.
-For example:
+* `USERNAME`/`PASSWORD` login was removed. API keys are scoped, revocable and do
+  not require storing an account password; MFA-protected accounts cannot log in
+  through the API anyway.
+* TLS certificates are now verified by default (`CRAFTY_VERIFY_SSL=true`).
 
-```bash
-  >start da459ce3-6964-46b8-bb21-1c3e753b6ba9
-```
+---
 
-## Issues
+## Troubleshooting
 
-If you encounter any issues while using the bot, please report them on the
-[GitHub Issues](https://github.com/Two-Play/Crafty-Discord-bot/issues) page.
+| Symptom | Likely cause |
+| --- | --- |
+| “Crafty is unreachable” and the VM is `deallocated` | Expected — run `/azure start` or `/minecraft start`. |
+| “Crafty rejected the API token” | Key revoked, or missing the permission bit for that command. |
+| Commands do not appear in Discord | `DISCORD_GUILD_ID` unset (global commands take up to an hour) or the bot was invited without `applications.commands`. |
+| “Azure authentication failed” | Wrong tenant/client/secret, or the role assignment does not cover this VM. |
+| “Azure VM … could not be found” | Subscription, resource group or VM name mismatch. |
+| TLS errors against Crafty | Self-signed certificate: use a reverse proxy with a real certificate, or `CRAFTY_VERIFY_SSL=false` over a VPN. |
+| `/server logs` returns nothing | The API key lacks `TERMINAL` (console buffer) or `LOGS` (log file). |
+| `/schedule` says not authorised | The API key lacks `SCHEDULE`. |
+| Everything is slow on the Pi | Normal on first import; check `journalctl -u crafty-bot` and confirm `LOG_LEVEL=INFO`. |
 
-## Contributing
+`LOG_LEVEL=DEBUG` logs request paths and status codes (never tokens).
 
-If you would like to contribute to the project, please follow these steps:
+---
 
-1. Fork the repository
-2. Create a new branch (`git checkout -b feature`)
-3. Make your changes
-4. Commit your changes (`git commit -am 'Add new feature'`)
-5. Push to the branch (`git push origin feature`)
-6. Create a new Pull Request
-7. Wait for your Pull Request to be reviewed
-8. Once your Pull Request is approved, it will be merged into the main branch
-9. Congratulations! You have successfully contributed to the project
+## Credits and licence
 
-Thank you for your contribution!
+Originally created by [Philippe Westenfelder (Two-Play)](https://github.com/Two-Play/Crafty-Discord-bot);
+this fork extends it with Azure orchestration, a service layer and a modern
+Discord interface. Crafty Controller is a project of
+[Arcadia Technology](https://craftycontrol.com).
 
-If you have any questions, please feel free to reach out to us
-
-## Support the Project
-
-If you would like to support the project, you can do so by:
-
-- Giving the project a star on GitHub
-- Sharing the project with others
-- Contributing to the project
-- Donating to the project
-
-## Donations
-
-If you would like to donate to the project, you can do so using the following methods:
-
-| Platform                                                                                                                             | Link                                                                    | QR Code                                                                                                                                                                                           |
-|--------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| ![Buy Me A Coffee Badge](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FD0?logo=buymeacoffee&logoColor=000&style=for-the-badge) | [Buy Me a Coffee](https://www.buymeacoffee.com/TwoPlay)                 | ![Buy Me a Coffee QR Code](https://api.qrserver.com/v1/create-qr-code/?color=000000&bgcolor=FFFFFF&data=https://www.buymeacoffee.com/TwoPlay&qzone=1&margin=0&size=150x150&ecc=L)                 |
-| ![PayPal Badge](https://img.shields.io/badge/PayPal-003087?logo=paypal&logoColor=fff&style=for-the-badge)                            | [PayPal](https://www.paypal.com/donate/?hosted_button_id=RQAUT43DDLTJG) | ![PayPal QR Code](https://api.qrserver.com/v1/create-qr-code/?color=000000&bgcolor=FFFFFF&data=https://www.paypal.com/donate/?hosted_button_id=RQAUT43DDLTJG&qzone=1&margin=0&size=150x150&ecc=L) |
-
-### Cryptocurrency Donations
-
-You can click on the QR code to show a larger version of the QR code. GitHub does not support displaying large images in
-the README file.
-
-| Cryptocurrency                                                                                                  | Abbreviation | <div style="min-width:150px">QR-Code</div>                                                                                                                                                                                          | Address                                                                                           |
-|:----------------------------------------------------------------------------------------------------------------|:-------------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------------------|
-| ![Bitcoin Badge](https://img.shields.io/badge/Bitcoin-F7931A?logo=bitcoin&logoColor=fff&style=for-the-badge)    | BTC          | <img src="https://api.qrserver.com/v1/create-qr-code/?color=000000&bgcolor=FFFFFF&data=bc1qk2xrz4mffeyh9dv8jm42vlejgmzft3adnweeqy&qzone=1&margin=0&size=150x150&ecc=L" style="min-width:150px" alr="Bitcoin QR-Code">               | `bc1qk2xrz4mffeyh9dv8jm42vlejgmzft3adnweeqy`                                                      |
-| ![Ethereum Badge](https://img.shields.io/badge/Ethereum-3C3C3D?logo=ethereum&logoColor=fff&style=for-the-badge) | ETH          | ![Ethereum QR Code](https://api.qrserver.com/v1/create-qr-code/?color=000000&bgcolor=FFFFFF&data=0xBA615b7341C0d9aB4337dE4927B87e9E30fbE0b9&qzone=1&margin=0&size=150x150&ecc=L)                                                    | `0xBA615b7341C0d9aB4337dE4927B87e9E30fbE0b9`                                                      |
-| ![Litecoin Badge](https://img.shields.io/badge/Litecoin-A6A9AA?logo=litecoin&logoColor=fff&style=for-the-badge) | LTC          | ![Litecoin QR Code](https://api.qrserver.com/v1/create-qr-code/?color=000000&bgcolor=FFFFFF&data=LNTn2u6svYMYswuwPSWTj41iXnxe4tP99i&qzone=1&margin=0&size=150x150&ecc=L)                                                            | `LNTn2u6svYMYswuwPSWTj41iXnxe4tP99i`                                                              |
-| ![Monero Badge](https://img.shields.io/badge/Monero-F60?logo=monero&logoColor=fff&style=for-the-badge)          | XMR          | ![Monero QR Code](https://api.qrserver.com/v1/create-qr-code/?color=000000&bgcolor=FFFFFF&data=41hZYQV5uDzfiLCusRAxARST3hfTzGv7RNRyB92G1RZw64pvEQqwDo94zZHVxfvcmncLU1ockvJxbZBQToPqqDtBAor97sU&qzone=1&margin=0&size=150x150&ecc=L) | `41hZYQV5uDzfiLCusRAxARST3hfTzGv7RNRyB92G1RZw64pvEQqwDo94zZHVxfvcmncLU1ockvJxbZBQToPqqDtBAor97sU` |
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
+Released under the [MIT licence](LICENSE.md).

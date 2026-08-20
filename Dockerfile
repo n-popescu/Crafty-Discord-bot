@@ -1,15 +1,13 @@
+# Optional container image. On a Raspberry Pi Zero W, running the bot directly
+# under systemd (see README) uses noticeably less memory than Docker.
 FROM python:3.12-slim
-LABEL authors="Philippe Westenfelder"
 
-WORKDIR /usr/src/app
+WORKDIR /app
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY bot ./bot
 
-ENV PYTHONWARNINGS="ignore:Unverified HTTPS request"
-
-CMD [ "python", "./core/main.py" ]
-
-#ENTRYPOINT ["top", "-b"]
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "-m", "bot"]
