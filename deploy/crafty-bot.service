@@ -1,0 +1,28 @@
+[Unit]
+Description=Crafty + Azure Discord control panel
+Documentation=https://github.com/n-popescu/Crafty-Discord-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=craftybot
+Group=craftybot
+WorkingDirectory=/opt/crafty-bot
+EnvironmentFile=/opt/crafty-bot/.env
+ExecStart=/opt/crafty-bot/.venv/bin/python -m bot
+Restart=on-failure
+RestartSec=15
+
+# The bot only needs outbound network access.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+# Keep the footprint predictable on a 512 MB Pi Zero W.
+MemoryMax=200M
+
+[Install]
+WantedBy=multi-user.target
