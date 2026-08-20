@@ -67,16 +67,18 @@ class AzureCog(ServiceCog):
         await interaction.edit_original_response(embed=embed)
 
     # ------------------------------------------------------------------ #
-    @group.command(name="start", description="Start the VM, then wait for Crafty and Minecraft")
+    @group.command(
+        name="start", description="Start the Azure VM (Minecraft stays down unless asked)"
+    )
     @app_commands.describe(
-        start_minecraft="Also start the Minecraft server once Crafty answers (default: yes)",
+        start_minecraft="Also wait for Crafty and start Minecraft (default: no, VM only)",
         server="Crafty server (defaults to the configured one)",
     )
     @app_commands.autocomplete(server=server_autocomplete)
     async def start(
         self,
         interaction: discord.Interaction,
-        start_minecraft: bool = True,
+        start_minecraft: bool = False,
         server: str | None = None,
     ) -> None:
         if not await self.guard(interaction, Tier.AZURE):
@@ -119,7 +121,14 @@ class AzureCog(ServiceCog):
             )
             return
         logger.info("User %s started Azure VM %s", interaction.user.id, self.azure.vm_name)
-        await interaction.edit_original_response(embed=embeds.azure_embed(running))
+        embed = embeds.azure_embed(running)
+        embed.add_field(
+            name="Minecraft",
+            value="Not started. Use `/azure start start_minecraft:true` or "
+            "`/minecraft start` to bring the server up too.",
+            inline=False,
+        )
+        await interaction.edit_original_response(embed=embed)
 
     # ------------------------------------------------------------------ #
     @group.command(

@@ -38,6 +38,14 @@ class CraftyUnavailable(CraftyError):
     user_message = "Crafty is unreachable. The host may be offline."
 
 
+class CraftyHostOffline(CraftyUnavailable):
+    """The machine hosting Crafty is powered off, so no request was attempted."""
+
+    user_message = (
+        "The Azure VM that hosts Crafty is powered off, so Crafty was not contacted."
+    )
+
+
 class CraftyAuthError(CraftyError):
     """The API token is invalid, expired or lacks the required permission."""
 

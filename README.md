@@ -19,19 +19,20 @@ and rebuilt around modern slash commands, a service layer and Azure orchestratio
 3. [Command reference](#command-reference)
 4. [Requirements](#requirements)
 5. [Installation on a Raspberry Pi Zero W](#installation-on-a-raspberry-pi-zero-w)
-6. [Discord setup](#discord-setup)
-7. [Crafty setup](#crafty-setup)
-8. [Azure setup](#azure-setup)
-9. [Environment variables](#environment-variables)
-10. [How the orchestration works](#how-the-orchestration-works)
-11. [Permissions model](#permissions-model)
-12. [Security considerations](#security-considerations)
-13. [Resource usage and caching](#resource-usage-and-caching)
-14. [Crafty API coverage](#crafty-api-coverage)
-15. [Development and tests](#development-and-tests)
-16. [Migrating from the original bot](#migrating-from-the-original-bot)
-17. [Troubleshooting](#troubleshooting)
-18. [Credits and licence](#credits-and-licence)
+6. [Updating](#updating)
+7. [Discord setup](#discord-setup)
+8. [Crafty setup](#crafty-setup)
+9. [Azure setup](#azure-setup)
+10. [Environment variables](#environment-variables)
+11. [How the orchestration works](#how-the-orchestration-works)
+12. [Permissions model](#permissions-model)
+13. [Security considerations](#security-considerations)
+14. [Resource usage and caching](#resource-usage-and-caching)
+15. [Crafty API coverage](#crafty-api-coverage)
+16. [Development and tests](#development-and-tests)
+17. [Migrating from the original bot](#migrating-from-the-original-bot)
+18. [Troubleshooting](#troubleshooting)
+19. [Credits and licence](#credits-and-licence)
 
 ---
 
@@ -89,6 +90,10 @@ bot/
 │   ├── embeds.py      reusable embed builders
 │   └── views.py       buttons, confirmations, select menus
 └── cogs/              status, server, azure, minecraft, schedule
+
+deploy/
+├── crafty-bot.service systemd unit
+└── update.sh          manual updater (pull, reinstall, restart)
 ```
 
 ---
@@ -110,6 +115,11 @@ bot/
   supports, and nothing it does not.
 * **Granular permissions** — read-only for everyone, Minecraft control for a
   role, Azure control for another, destructive actions for administrators.
+* **VM-aware Crafty calls** — Crafty lives on the Azure VM, so while that VM is
+  stopped or deallocated the bot skips the Crafty API entirely instead of waiting
+  for TCP timeouts, and says why.
+* **VM-only control** — `/azure start` brings up just the VM; Minecraft only
+  starts when you ask for it with `start_minecraft:true`.
 * **Fails soft** — if Crafty is unreachable the bot still starts, still answers,
   and tells you the VM's power state (which is usually the reason).
 
@@ -135,7 +145,7 @@ bot/
 | `/server kill [server]` | admin | Force-kill a frozen server (asks for confirmation) |
 | `/azure status` | everyone | VM power state, region, size, public IP |
 | `/azure ip` | everyone | Public and private IP addresses |
-| `/azure start [start_minecraft] [server]` | azure | Start the VM, wait for Crafty, then start Minecraft |
+| `/azure start [start_minecraft] [server]` | azure | Start the VM only; `start_minecraft:true` also waits for Crafty and starts Minecraft |
 | `/azure stop [force] [server]` | azure (`force`: admin) | Stop Minecraft, then deallocate the VM (asks for confirmation) |
 | `/azure restart [server]` | admin | Stop Minecraft, then reboot the VM |
 | `/minecraft start [server]` | server (+azure if the VM is down) | Bring the whole stack up |
@@ -155,6 +165,8 @@ Examples:
 /server logs lines:30 source:Server log file (latest.log)
 /minecraft start
 /minecraft stop shutdown_vm:true
+/azure start
+/azure start start_minecraft:true
 /azure stop force:true
 /schedule run task_id:4 cascade:true
 ```
@@ -249,6 +261,53 @@ environment from `/opt/crafty-bot/.env`.
 
 > **Docker** is available (`docker build -t crafty-bot .`) but is not recommended
 > on a Pi Zero W: the container runtime costs more memory than the bot itself.
+
+---
+
+## Updating
+
+`deploy/update.sh` is a manual updater: it fast-forwards the checkout, reinstalls
+dependencies only when `requirements.txt` changed, restarts the service and
+prints its status.
+
+```bash
+sudo /opt/crafty-bot/deploy/update.sh
+```
+
+```
+==> Fetching origin/master
+==> Updating 4105a18 -> 9f3c1d2
+9f3c1d2 Skip Crafty calls while the Azure VM is powered off
+==> Installing dependencies into /opt/crafty-bot/.venv
+==> Restarting crafty-bot
+==> Now running 9f3c1d2 on master.
+```
+
+It refuses to run if the checkout has local modifications (`.env` is ignored, so
+your configuration is never touched), and it never lets root write into the
+checkout: git runs as the user that owns the directory, `systemctl` as root.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `REPO_DIR` | the script's own repository | Checkout to update |
+| `BRANCH` | the checked-out branch | Branch to fast-forward to |
+| `REMOTE` | `origin` | Remote to fetch from |
+| `SERVICE` | `crafty-bot` | systemd unit to restart |
+| `VENV` | `$REPO_DIR/.venv` | Virtualenv holding the dependencies |
+| `FORCE` | `0` | `1` reinstalls and restarts even when already up to date |
+
+```bash
+# Track a different branch, or force a restart without any new commits.
+sudo BRANCH=develop /opt/crafty-bot/deploy/update.sh
+sudo FORCE=1 /opt/crafty-bot/deploy/update.sh
+```
+
+Docker deployments update the usual way instead:
+
+```bash
+docker pull ghcr.io/n-popescu/crafty-discord-bot:latest
+docker compose up -d          # or: docker restart crafty-bot
+```
 
 ---
 
@@ -451,7 +510,23 @@ startup — never by value.
 
 ## How the orchestration works
 
-### Starting (`/minecraft start`, `/azure start`, `/status ▶`)
+### Crafty only exists while the VM runs
+
+Crafty Controller runs *on* the Azure VM, so every Crafty request first checks the
+cached VM power state (5 s TTL):
+
+```
+VM deallocated / stopped ──▶ no HTTP call at all
+                             "The Azure VM that hosts Crafty is powered off."
+VM running / starting / unknown ──▶ normal Crafty request
+```
+
+This applies to every command, to autocomplete and to the idle watcher, so a
+powered-off VM costs no Crafty timeouts. Transitional states still send the
+request — that is exactly what the start workflow polls for. If Azure itself
+cannot be queried the gate opens, so an Azure outage never hides a healthy Crafty.
+
+### Starting (`/minecraft start`, `/azure start start_minecraft:true`, `/status ▶`)
 
 ```
 Is the VM running?  ──no──▶ POST …/start
@@ -468,6 +543,10 @@ Is Minecraft running? ─no──▶ POST …/action/start_server
 Each arrow updates the same Discord message. Nothing sleeps for a fixed period:
 every wait is a poll with exponential backoff and a hard timeout
 (`START_TIMEOUT`).
+
+`/azure start` on its own stops after `PowerState/running`: the VM is up, Crafty
+boots on it, and Minecraft stays down until someone runs `/minecraft start` (or
+`/azure start start_minecraft:true`).
 
 ### Stopping (`/azure stop`)
 
@@ -629,7 +708,7 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-130 tests, roughly two seconds, **no network access**:
+135 tests, roughly four seconds, **no network access**:
 
 * `test_crafty_service.py` — status/start/stop/restart/players/console/logs/
   backups/scheduler, response-shape quirks, retries, and every error class
@@ -643,7 +722,8 @@ python -m pytest -q
   `Minecraft running → /azure stop → …`), plus forced stops, refusing to
   deallocate when Crafty is down, and degraded snapshots.
 * `test_config.py`, `test_ui.py`, `test_bot.py` — configuration validation,
-  permission tiers, caching, formatting, embeds and the registered command tree.
+  permission tiers, caching, formatting, embeds, the registered command tree and
+  the VM-aware Crafty gate (no request while the VM is off).
 
 Crafty and Azure are simulated by local `aiohttp` applications built from the
 real response shapes, so the tests exercise genuine HTTP behaviour while being
@@ -677,7 +757,7 @@ structurally unable to touch a real service.
 
 | Symptom | Likely cause |
 | --- | --- |
-| “Crafty is unreachable” and the VM is `deallocated` | Expected — run `/azure start` or `/minecraft start`. |
+| “The Azure VM that hosts Crafty is powered off” | Expected — the bot did not even try Crafty. Run `/azure start` (VM only) or `/minecraft start` (whole stack). |
 | “Crafty rejected the API token” | Key revoked, or missing the permission bit for that command. |
 | Commands do not appear in Discord | `DISCORD_GUILD_ID` unset (global commands take up to an hour) or the bot was invited without `applications.commands`. |
 | “Azure authentication failed” | Wrong tenant/client/secret, or the role assignment does not cover this VM. |
