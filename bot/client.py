@@ -25,6 +25,7 @@ COGS = (
     "bot.cogs.azure",
     "bot.cogs.minecraft",
     "bot.cogs.schedule",
+    "bot.cogs.webhooks",
 )
 
 

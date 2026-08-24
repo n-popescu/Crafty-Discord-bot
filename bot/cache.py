@@ -20,6 +20,9 @@ class TTLCache:
     def __init__(self) -> None:
         self._values: dict[str, tuple[float, Any]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        #: How many coroutines currently hold or await each lock, so that a lock
+        #: is only discarded once nobody can still be queued behind it.
+        self._waiters: dict[str, int] = {}
 
     def get(self, key: str) -> Any | None:
         entry = self._values.get(key)
@@ -53,11 +56,23 @@ class TTLCache:
             return cached
 
         lock = self._locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            # Another coroutine may have populated the entry while we waited.
-            cached = self.get(key)
-            if cached is not None:
-                return cached
-            value = await factory()
-            self.set(key, value, ttl)
-            return value
+        # Keys embed server ids and task ids, so a long-running bot would keep
+        # accumulating locks; they are reference-counted and dropped when the
+        # last interested coroutine leaves.
+        self._waiters[key] = self._waiters.get(key, 0) + 1
+        try:
+            async with lock:
+                # Another coroutine may have populated the entry while we waited.
+                cached = self.get(key)
+                if cached is not None:
+                    return cached
+                value = await factory()
+                self.set(key, value, ttl)
+                return value
+        finally:
+            remaining = self._waiters.get(key, 1) - 1
+            if remaining <= 0:
+                self._waiters.pop(key, None)
+                self._locks.pop(key, None)
+            else:
+                self._waiters[key] = remaining

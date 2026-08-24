@@ -7,14 +7,22 @@ or renders a credential.
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import discord
 
 from bot.services.azure import POWER_RUNNING, VmStatus
-from bot.services.crafty import BackupConfig, HostStats, ServerStats
+from bot.services.crafty import (
+    BackupConfig,
+    HistorySample,
+    HostStats,
+    Player,
+    ServerStats,
+    ServerStatusLine,
+    Webhook,
+)
 from bot.services.orchestrator import InfraSnapshot, Step, StepState
-from bot.utils import human_bytes, uptime_since
+from bot.utils import human_bytes, sparkline, uptime_since
 
 NA = "N/A"
 FOOTER = "Crafty Control Panel"
@@ -125,7 +133,12 @@ def _resource_lines(stats: ServerStats, host: HostStats | None) -> str:
     return "\n".join(lines)
 
 
-def status_embed(snapshot: InfraSnapshot, host: HostStats | None = None) -> discord.Embed:
+def status_embed(
+    snapshot: InfraSnapshot,
+    host: HostStats | None = None,
+    *,
+    clock_offset: float = 0.0,
+) -> discord.Embed:
     """The centrepiece: one embed describing the whole infrastructure."""
     stats = snapshot.stats
     title = "🎮 Minecraft Infrastructure"
@@ -155,7 +168,7 @@ def status_embed(snapshot: InfraSnapshot, host: HostStats | None = None) -> disc
                     _state_line(stats.state),
                     version_bits or None,
                     f"👥 Players {_players_value(stats)}",
-                    f"⏱️ Uptime **{uptime_since(stats.started_at)}**"
+                    f"⏱️ Uptime **{uptime_since(stats.started_at, offset_hours=clock_offset)}**"
                     if stats.running
                     else None,
                 )
@@ -229,14 +242,23 @@ def health_embed(
 # --------------------------------------------------------------------------- #
 # Server-specific
 # --------------------------------------------------------------------------- #
-def server_embed(stats: ServerStats, host: HostStats | None = None) -> discord.Embed:
+def server_embed(
+    stats: ServerStats,
+    host: HostStats | None = None,
+    *,
+    clock_offset: float = 0.0,
+) -> discord.Embed:
     colour = COLOR_ERROR if stats.crashed else (COLOR_ONLINE if stats.running else COLOR_OFFLINE)
     embed = _base(f"🎮 {stats.name or 'Minecraft server'}", colour, _state_line(stats.state))
     embed.add_field(name="Version", value=stats.version or NA, inline=True)
     embed.add_field(name="Players", value=_players_value(stats), inline=True)
     embed.add_field(name="Port", value=str(stats.port) if stats.port else NA, inline=True)
     if stats.running:
-        embed.add_field(name="Uptime", value=uptime_since(stats.started_at), inline=True)
+        embed.add_field(
+            name="Uptime",
+            value=uptime_since(stats.started_at, offset_hours=clock_offset),
+            inline=True,
+        )
         embed.add_field(
             name="CPU",
             value=f"{stats.cpu_percent:.0f}%" if stats.cpu_percent is not None else NA,
@@ -356,3 +378,168 @@ def workflow_embed(
     prefix = "✅" if finished and not failed else ("❌" if failed else "⏳")
     return _base(f"{prefix} {title}", colour, "\n".join(lines))
 
+
+
+# --------------------------------------------------------------------------- #
+# Multi-server overview
+# --------------------------------------------------------------------------- #
+def servers_overview_embed(lines: Sequence[ServerStatusLine]) -> discord.Embed:
+    """Every server Crafty publishes, from a single ``GET /servers/status`` call."""
+    if not lines:
+        return warning_embed(
+            "No servers",
+            "Crafty published no servers. Servers are hidden unless *Show status* "
+            "is enabled for them in the Crafty panel.",
+        )
+
+    running = sum(1 for line in lines if line.running)
+    players = sum(line.online or 0 for line in lines if line.running)
+    colour = COLOR_ONLINE if running else COLOR_OFFLINE
+    embed = _base(f"🗂️ Crafty servers — {running}/{len(lines)} up", colour)
+
+    for line in lines[:20]:
+        name = line.world_name or line.server_id[:8]
+        detail = [_state_line("running" if line.running else "stopped")]
+        if line.running:
+            detail.append(f"👥 {line.online or 0} / {line.max_players or '?'}")
+        if line.version:
+            detail.append(f"🏷️ {line.version}")
+        embed.add_field(name=f"🎮 {name}", value="\n".join(detail), inline=True)
+
+    if len(lines) > 20:
+        embed.description = f"Showing the first 20 of {len(lines)} servers."
+    embed.set_footer(text=f"{FOOTER} • {players} players online in total")
+    return embed
+
+
+def history_embed(samples: Sequence[HistorySample], server_name: str) -> discord.Embed:
+    """Draw Crafty's stored samples as text sparklines.
+
+    Crafty keeps roughly the last hour. Charts are drawn with block characters
+    rather than rendered images, which keeps the Pi Zero W out of the business
+    of generating PNGs.
+    """
+    if not samples:
+        return warning_embed(
+            "No history",
+            "Crafty has no recorded samples for this server yet. It records them "
+            "while the server runs, and keeps about an hour.",
+        )
+
+    embed = _base(f"📈 Last hour — {server_name}", COLOR_INFO)
+
+    def _row(label: str, values: Sequence[float | int | None], unit: str) -> None:
+        present = [value for value in values if value is not None]
+        if not present:
+            return
+        embed.add_field(
+            name=f"{label} — now {present[-1]:.0f}{unit} (peak {max(present):.0f}{unit})",
+            value=f"```\n{sparkline(values)}\n```",
+            inline=False,
+        )
+
+    _row("⚡ CPU", [sample.cpu_percent for sample in samples], "%")
+    _row("🧠 RAM", [sample.memory_percent for sample in samples], "%")
+    _row("👥 Players", [sample.online for sample in samples], "")
+
+    span = [sample.at for sample in samples if sample.at is not None]
+    if len(span) >= 2:
+        embed.set_footer(
+            text=(
+                f"{FOOTER} • {len(samples)} samples, "
+                f"{span[0].strftime('%H:%M')}–{span[-1].strftime('%H:%M')}"
+            )
+        )
+    return embed
+
+
+# --------------------------------------------------------------------------- #
+# Server files
+# --------------------------------------------------------------------------- #
+#: Settings worth surfacing first; everything else is folded into an extract.
+KEY_PROPERTIES = (
+    "motd",
+    "difficulty",
+    "gamemode",
+    "max-players",
+    "level-name",
+    "level-seed",
+    "online-mode",
+    "white-list",
+    "pvp",
+    "hardcore",
+    "view-distance",
+    "simulation-distance",
+    "server-port",
+    "allow-flight",
+    "spawn-protection",
+)
+
+
+def properties_embed(properties: Mapping[str, str], server_name: str) -> discord.Embed:
+    """Show ``server.properties``, highlighting the settings people ask about."""
+    if not properties:
+        return warning_embed(
+            "No properties", "`server.properties` is empty or was not readable."
+        )
+
+    embed = _base(f"📄 server.properties — {server_name}", COLOR_INFO)
+    for key in KEY_PROPERTIES:
+        if key in properties:
+            value = properties[key] or "—"
+            embed.add_field(name=key, value=f"`{value[:200]}`", inline=True)
+
+    remaining = sorted(key for key in properties if key not in KEY_PROPERTIES)
+    if remaining:
+        body = "\n".join(f"{key}={properties[key]}" for key in remaining)
+        if len(body) > 1000:
+            body = body[:1000] + "\n…"
+        embed.add_field(name=f"Other ({len(remaining)})", value=f"```\n{body}\n```", inline=False)
+    embed.set_footer(text=f"{FOOTER} • {len(properties)} settings • read-only")
+    return embed
+
+
+def player_list_embed(
+    title: str, players: Sequence[Player], server_name: str, *, empty_hint: str
+) -> discord.Embed:
+    """Render whitelist / ops / ban list entries."""
+    embed = _base(f"{title} — {server_name}", COLOR_INFO if players else COLOR_OFFLINE)
+    if not players:
+        embed.description = empty_hint
+        return embed
+    body = "\n".join(f"👤 **{player.name}**" for player in players[:40])
+    if len(players) > 40:
+        body += f"\n… and {len(players) - 40} more"
+    embed.description = body
+    embed.set_footer(text=f"{FOOTER} • {len(players)} entries")
+    return embed
+
+
+# --------------------------------------------------------------------------- #
+# Webhooks
+# --------------------------------------------------------------------------- #
+def webhooks_embed(webhooks: Sequence[Webhook], server_name: str) -> discord.Embed:
+    """List Crafty's own webhooks without ever printing their URLs.
+
+    A webhook URL is a credential: anyone holding it can post into the channel,
+    so only the provider and the events are shown.
+    """
+    embed = _base(f"🔔 Event webhooks — {server_name}", COLOR_INFO)
+    if not webhooks:
+        embed.description = (
+            "No webhook is configured. `/webhook create` makes Crafty announce "
+            "starts, stops and crashes in a Discord channel by itself — no "
+            "polling from the bot."
+        )
+        return embed
+
+    for webhook in webhooks[:15]:
+        events = ", ".join(webhook.triggers) or "—"
+        state = "enabled" if webhook.enabled else "disabled"
+        embed.add_field(
+            name=f"{'🟢' if webhook.enabled else '⚫'} {webhook.name or webhook.webhook_id}",
+            value=f"`{webhook.webhook_id}` • {webhook.provider} • {state}\nEvents: {events}",
+            inline=False,
+        )
+    embed.set_footer(text=f"{FOOTER} • URLs are hidden on purpose")
+    return embed

@@ -10,6 +10,7 @@ from bot.services.azure import POWER_DEALLOCATED, POWER_RUNNING, VmStatus
 
 EXPECTED_COMMANDS = {
     "status": set(),
+    "servers": set(),
     "health": set(),
     "server": {
         "status",
@@ -17,17 +18,22 @@ EXPECTED_COMMANDS = {
         "info",
         "resources",
         "logs",
+        "history",
+        "properties",
+        "roster",
         "start",
         "stop",
         "restart",
         "kill",
+        "update",
         "command",
         "backups",
         "backup",
     },
     "azure": {"status", "ip", "start", "stop", "restart"},
     "minecraft": {"start", "stop", "restart"},
-    "schedule": {"info", "run"},
+    "schedule": {"info", "run", "create", "toggle", "delete"},
+    "webhook": {"list", "create", "test", "toggle", "delete"},
 }
 
 
@@ -130,3 +136,59 @@ async def test_azure_start_only_starts_the_vm_by_default(bot):
     start = next(c for c in group.commands if c.name == "start")
     option = next(p for p in start.parameters if p.name == "start_minecraft")
     assert option.default is False
+
+
+# --------------------------------------------------------------------------- #
+# Webhook cog guard rails
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://discord.com/api/webhooks/123456789/abcDEF-_123",
+        "https://discordapp.com/api/webhooks/1/tok",
+        "https://ptb.discord.com/api/webhooks/1/tok",
+    ],
+)
+def test_real_discord_webhook_urls_are_accepted(url):
+    from bot.cogs.webhooks import DISCORD_WEBHOOK_RE
+
+    assert DISCORD_WEBHOOK_RE.match(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://discord.com/api/webhooks/1/tok",  # not TLS
+        "https://evil.example.com/api/webhooks/1/tok",  # would leak activity
+        "https://discord.com/api/webhooks/1/tok?x=1",
+        "https://discord.com/channels/1/2",
+        "not a url",
+    ],
+)
+def test_other_urls_are_rejected(url):
+    from bot.cogs.webhooks import DISCORD_WEBHOOK_RE
+
+    assert DISCORD_WEBHOOK_RE.match(url) is None
+
+
+def test_every_webhook_preset_uses_events_crafty_knows():
+    from bot.cogs.webhooks import EVENT_PRESETS, PRESET_CHOICES
+    from bot.services.crafty import WEBHOOK_EVENTS
+
+    for events in EVENT_PRESETS.values():
+        assert set(events) <= set(WEBHOOK_EVENTS)
+    # Every preset must be reachable from the slash command.
+    assert {choice.value for choice in PRESET_CHOICES} == set(EVENT_PRESETS)
+
+
+def test_every_schedule_action_choice_is_supported():
+    from bot.cogs.schedule import ACTION_CHOICES
+    from bot.services.crafty import TASK_ACTIONS
+
+    assert [choice.value for choice in ACTION_CHOICES] == list(TASK_ACTIONS)
+
+
+def test_every_roster_choice_maps_to_a_file():
+    from bot.cogs.server import ROSTER_CHOICES, ROSTER_FILES
+
+    assert {choice.value for choice in ROSTER_CHOICES} == set(ROSTER_FILES)

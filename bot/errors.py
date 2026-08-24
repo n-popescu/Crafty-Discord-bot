@@ -59,7 +59,16 @@ class CraftyNotFound(CraftyError):
 
 
 class CraftyAPIError(CraftyError):
-    """Crafty replied, but with an error status or an unusable body."""
+    """Crafty replied, but with an error status or an unusable body.
+
+    ``code`` carries Crafty's own machine-readable error string (for instance
+    ``DECODE_ERROR``) so callers can react to a specific failure without having
+    to match on the human-readable message.
+    """
+
+    def __init__(self, user_message: str | None = None, *, code: str = "") -> None:
+        self.code = code
+        super().__init__(user_message)
 
 
 # --------------------------------------------------------------------------- #

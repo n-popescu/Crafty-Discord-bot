@@ -113,6 +113,21 @@ deploy/
   dangerous commands such as `stop` or `ban`.
 * **Logs, players, backups, scheduler** — everything the Crafty v2 API actually
   supports, and nothing it does not.
+* **Push notifications with zero polling** — `/webhook create` points Crafty's
+  own webhook system at a Discord channel, so starts, stops, crashes, backups
+  and jar updates are announced *by the Crafty host*. The Pi does no work at all,
+  and the announcements keep arriving even while the bot is offline.
+* **Multi-server overview** — `/servers` lists every server in a single
+  `GET /servers/status` call, however many are configured.
+* **Text-drawn charts** — `/server history` renders the last hour of CPU, RAM and
+  player count as Unicode sparklines. No matplotlib, no image rendering, no
+  megabytes of dependencies on a 512 MB Pi.
+* **Read-only file access** — `/server properties` and `/server roster` show
+  `server.properties`, the whitelist, the operator list and the ban list without
+  opening the Crafty panel.
+* **Crafty-side schedules** — `/schedule create` sets up a cron task that runs on
+  the Crafty host, so a nightly restart or backup fires whether or not the bot is
+  running.
 * **Granular permissions** — read-only for everyone, Minecraft control for a
   role, Azure control for another, destructive actions for administrators.
 * **VM-aware Crafty calls** — Crafty lives on the Azure VM, so while that VM is
@@ -130,12 +145,16 @@ deploy/
 | Command | Tier | What it does |
 | --- | --- | --- |
 | `/status [server]` | everyone | Full infrastructure overview with action buttons |
+| `/servers` | everyone | Every server Crafty publishes, in one API call |
 | `/health` | everyone | Which layer is broken: bot, Crafty, Azure or Minecraft (ephemeral) |
 | `/server status [server]` | everyone | Detailed server statistics |
 | `/server players [server]` | everyone | Online players, with UUIDs when Crafty reports them |
 | `/server info [server]` | everyone | Server configuration (type, address, autostart, …) |
 | `/server resources` | everyone | CPU/RAM/disk of the Crafty host (i.e. the VM) |
+| `/server history [server]` | everyone | CPU, RAM and player sparklines for the last hour |
 | `/server logs [lines] [source] [server]` | server | Last log lines from the console buffer or `latest.log` (ephemeral) |
+| `/server properties [server]` | server | Read `server.properties` (ephemeral, read-only) |
+| `/server roster which:<list> [server]` | server | Read the whitelist, operator list or ban list (ephemeral) |
 | `/server start [server]` | server | Start Minecraft (starts the VM first if needed) |
 | `/server stop [server] [shutdown_vm]` | server (+azure for `shutdown_vm`) | Graceful stop, optionally deallocating the VM |
 | `/server restart [server]` | server | Restart through Crafty |
@@ -143,6 +162,7 @@ deploy/
 | `/server backup [server]` | server | Run a Crafty backup configuration |
 | `/server backups [server]` | server | List backup configurations |
 | `/server kill [server]` | admin | Force-kill a frozen server (asks for confirmation) |
+| `/server update [server]` | admin | Install the jar update Crafty found (asks for confirmation) |
 | `/azure status` | everyone | VM power state, region, size, public IP |
 | `/azure ip` | everyone | Public and private IP addresses |
 | `/azure start [start_minecraft] [server]` | azure | Start the VM only; `start_minecraft:true` also waits for Crafty and starts Minecraft |
@@ -153,6 +173,14 @@ deploy/
 | `/minecraft restart [server]` | server | Restart, starting the VM if necessary |
 | `/schedule info task_id:<n> [server]` | server | Show one Crafty scheduled task |
 | `/schedule run task_id:<n> [cascade] [server]` | server | Run a Crafty task now, optionally cascading its chain |
+| `/schedule create action:<a> cron:<expr> [name] [command] [backup_id] [server]` | admin | Create a Crafty cron schedule |
+| `/schedule toggle task_id:<n> enabled:<bool> [server]` | admin | Pause or resume a schedule |
+| `/schedule delete task_id:<n> [server]` | admin | Delete a schedule (asks for confirmation) |
+| `/webhook list [server]` | server | Crafty's event webhooks (URLs are never shown) |
+| `/webhook create url:<url> [events] [name] [server]` | admin | Have Crafty announce events in a Discord channel |
+| `/webhook test webhook_id:<id> [server]` | server | Fire a sample event through a webhook |
+| `/webhook toggle webhook_id:<id> enabled:<bool> [server]` | admin | Enable or disable a webhook |
+| `/webhook delete webhook_id:<id> [server]` | admin | Remove a webhook (asks for confirmation) |
 
 Every command with a `server` option autocompletes the servers your Crafty API
 key can see, so multiple Crafty servers work out of the box.
@@ -485,6 +513,7 @@ startup — never by value.
 | `CRAFTY_VERIFY_SSL` | | `true` | Verify Crafty's TLS certificate |
 | `CRAFTY_TIMEOUT` | | `10` | Per-request timeout in seconds |
 | `CRAFTY_SERVER_ID` | | — | Default server for commands without `server` |
+| `CRAFTY_UTC_OFFSET` | | — | UTC offset **of the Crafty host** in hours (`2`, `-5`, `5.5`). Set it when the Pi and the VM are in different time zones, or uptimes are off by the difference |
 | `AZURE_SUBSCRIPTION_ID` | | — | Enables `/azure` when set with the next two |
 | `AZURE_RESOURCE_GROUP` | | — | Resource group of the VM |
 | `AZURE_VM_NAME` | | — | VM name |
@@ -644,8 +673,15 @@ Choices that matter on a 512 MB, single-core ARMv6 board:
   | Azure public IP | 60 s |
 
   Concurrent requests for the same key share one HTTP call, and any write
-  invalidates the affected entries immediately.
+  invalidates the affected entries immediately. Cache locks are reference-counted
+  and released with their entry, so nothing accumulates over a long uptime.
 * Progress edits are throttled to one per 1.5 s.
+* `/servers` costs exactly one request no matter how many servers exist.
+* `/server history` charts with Unicode block characters instead of rendering an
+  image — no matplotlib, no Pillow, no font stack.
+* **Webhooks move work off the Pi entirely.** `/webhook create` configures Crafty
+  to POST events straight to Discord, so a busy server generates announcements
+  without the bot polling, holding a WebSocket, or even running.
 * No database, no ORM, no web server, no Prometheus scraping, no browser.
 
 ---
@@ -663,27 +699,38 @@ OpenAPI document is outdated in places.
 | `GET /api/v2/crafty/check` | connectivity probe, `/health`, start workflow |
 | `GET /api/v2/crafty/stats` | `/server resources`, `/status` |
 | `GET /api/v2/servers` | autocomplete, server resolution |
+| `GET /api/v2/servers/status` | `/servers` (unauthenticated; one call for all servers) |
 | `GET /api/v2/servers/{id}` | `/server info` |
 | `GET /api/v2/servers/{id}/stats` | `/status`, `/server status`, `/server players` |
 | `POST /api/v2/servers/{id}/action/{action}` | start, stop, restart, kill, `backup_server/{backup_id}` |
 | `POST /api/v2/servers/{id}/stdin` | `/server command` |
 | `GET /api/v2/servers/{id}/logs` | `/server logs` (`?file=true` for the log file) |
 | `GET /api/v2/servers/{id}/backups` | `/server backups`, default-backup lookup |
+| `GET /api/v2/servers/{id}/history` | `/server history` |
+| `POST /api/v2/servers/{id}/files` | `/server properties`, `/server roster` (read-only) |
+| `GET /api/v2/servers/{id}/webhook` | `/webhook list` |
+| `POST /api/v2/servers/{id}/webhook` | `/webhook create` |
+| `PATCH/DELETE /api/v2/servers/{id}/webhook/{id}` | `/webhook toggle`, `/webhook delete` |
+| `POST /api/v2/servers/{id}/webhook/{id}` | `/webhook test` |
 | `GET /api/v2/servers/{id}/tasks/{taskId}` | `/schedule info` |
+| `POST /api/v2/servers/{id}/tasks` | `/schedule create` |
+| `PATCH/DELETE /api/v2/servers/{id}/tasks/{taskId}` | `/schedule toggle`, `/schedule delete` |
 | `POST /api/v2/servers/{id}/tasks/{taskId}/run` | `/schedule run` (with `cascade` for task chains) |
 
 **Deliberately not used**
 
 * `GET /api/v2/servers/{id}/tasks` and `/tasks/{id}/children` — stub handlers in
-  4.10.8 (`def get(...): pass`), so schedules cannot be listed over the API. The
-  bot exposes `/schedule info` and `/schedule run` with the task ID from the
-  panel instead of faking a list.
+  4.10.8 (`def get(...): pass`), so schedules cannot be *listed* over the API.
+  Creating, inspecting, pausing, deleting and running individual tasks all work
+  and are exposed; `/schedule create` reports the new task's ID, and IDs are also
+  visible in the panel under *Server → Schedule*.
 * **Console WebSocket** — authenticates with a browser cookie rather than an API
   key, and would require a permanently open connection. `/server logs` reads the
   same buffer over HTTP on demand, which is cheaper on a Pi Zero W.
-* **File manager, user/role management, server creation and deletion, config
-  patching, webhooks** — powerful and destructive, with no natural Discord UX.
-  They are intentionally out of scope; use the Crafty panel.
+* **File *writes*, user/role management, server creation and deletion, config
+  patching** — powerful and destructive, with no natural Discord UX. They are
+  intentionally out of scope; use the Crafty panel. `POST …/files` is used only
+  to *read* `server.properties` and the JSON player lists.
 * **`/metrics` (Prometheus)** — the bot is not a monitoring system.
 
 Quirks handled inside `CraftyService` so the rest of the code never sees them:
@@ -697,6 +744,22 @@ Quirks handled inside `CraftyService` so the rest of the code never sees them:
 * `GET …/backups` returns a mapping keyed by backup ID with no `status` envelope.
 * Permission failures arrive as HTTP 400 with `error: NOT_AUTHORIZED`, and some
   failures arrive as HTTP 200 with `status: error`; both map to typed exceptions.
+* `/logs` HTML-escapes every line (`&quot;`, `&#x27;`, `&lt;`) because the same
+  payload feeds Crafty's web terminal — the bot un-escapes them, otherwise the
+  entities show up literally inside the Discord code block.
+* Webhook triggers are stored as one trailing-comma string (`"a,b,c,"`) but must
+  be *sent* as a JSON array, and the create schema requires at least seven of its
+  eight properties while rejecting any it does not know.
+* A scheduled task has both an `action` (what the panel shows) and a `command`
+  (what the scheduler actually runs); Crafty's own front-end derives the second
+  as `f"{action}_server"`, which `create_task` reproduces exactly.
+* `POST …/files` answers 400 `DECODE_ERROR` for a file that does not exist yet,
+  which becomes a `CraftyNotFound` so `/server roster` can say *"nobody is banned"*
+  rather than *"the request was rejected"*.
+* `GET /servers/{id}` reports `last_backup`, but the value is Crafty's
+  `last_backup_failed` boolean — the bot labels it accordingly.
+* `/servers/status` and `/history` do not order their rows; history samples are
+  sorted before being charted.
 
 ---
 
@@ -765,6 +828,11 @@ structurally unable to touch a real service.
 | TLS errors against Crafty | Self-signed certificate: use a reverse proxy with a real certificate, or `CRAFTY_VERIFY_SSL=false` over a VPN. |
 | `/server logs` returns nothing | The API key lacks `TERMINAL` (console buffer) or `LOGS` (log file). |
 | `/schedule` says not authorised | The API key lacks `SCHEDULE`. |
+| `/webhook` says not authorised | The API key lacks `CONFIG`. |
+| `/server properties` or `/server roster` says not authorised | The API key lacks `FILES`. |
+| `/server roster` says a list does not exist yet | Minecraft only writes `whitelist.json`, `ops.json` and `banned-players.json` once the list is first used. |
+| `/server history` is empty | Crafty records samples only while a server runs, and keeps about an hour. |
+| `/servers` shows fewer servers than expected | `/servers/status` only publishes servers with *Show status* enabled in Crafty. |
 | Everything is slow on the Pi | Normal on first import; check `journalctl -u crafty-bot` and confirm `LOG_LEVEL=INFO`. |
 | Certificate or Azure token errors right after boot | The Pi Zero W has no clock. Check `timedatectl status`; the bot needs the time to be in sync. |
 | `pip` spends an hour compiling `aiohttp` | The virtualenv was created without `--system-site-packages`, so Debian's `python3-aiohttp` is invisible. Recreate it. |

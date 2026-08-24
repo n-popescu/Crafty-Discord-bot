@@ -9,10 +9,11 @@ from discord import app_commands
 
 from bot.client import CraftyBot
 from bot.cogs.base import ServiceCog, server_autocomplete
-from bot.errors import BotError
+from bot.errors import BotError, CraftyNotFound
 from bot.permissions import Tier
 from bot.ui import embeds
 from bot.ui.views import BackupSelectView, ConfirmView
+from bot.utils import clock_offset_hours
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,19 @@ DANGEROUS_COMMANDS = frozenset(
     }
 )
 
+#: ``value -> (embed title, file name, hint shown when the list is empty)``
+ROSTER_FILES = {
+    "whitelist": ("✅ Whitelist", "whitelist.json", "nobody has been whitelisted yet."),
+    "ops": ("🛡️ Operators", "ops.json", "nobody has been opped yet."),
+    "bans": ("🚫 Banned players", "banned-players.json", "nobody is banned."),
+}
+
+ROSTER_CHOICES = [
+    app_commands.Choice(name="Whitelist", value="whitelist"),
+    app_commands.Choice(name="Operators", value="ops"),
+    app_commands.Choice(name="Banned players", value="bans"),
+]
+
 LOG_SOURCES = [
     app_commands.Choice(name="Console buffer (live terminal)", value="terminal"),
     app_commands.Choice(name="Server log file (latest.log)", value="file"),
@@ -43,6 +57,11 @@ LOG_SOURCES = [
 
 class ServerCog(ServiceCog):
     """Read-only commands are open to everyone; control commands need a role."""
+
+    @property
+    def clock_offset(self) -> float:
+        """Hours between the Crafty host's clock and this bot's, for uptimes."""
+        return clock_offset_hours(self.config.crafty_utc_offset)
 
     group = app_commands.Group(name="server", description="Manage the Minecraft server through Crafty")
 
@@ -64,7 +83,9 @@ class ServerCog(ServiceCog):
         except BotError as exc:
             await self._fail(interaction, exc)
             return
-        await interaction.edit_original_response(embed=embeds.server_embed(stats))
+        await interaction.edit_original_response(
+            embed=embeds.server_embed(stats, clock_offset=self.clock_offset)
+        )
 
     @group.command(name="players", description="Who is online right now")
     @app_commands.describe(server="Crafty server (defaults to the configured one)")
@@ -124,10 +145,104 @@ class ServerCog(ServiceCog):
         if isinstance(status, dict) and status:
             embed.add_field(
                 name="Update available",
-                value="Yes" if status.get("update_available") else "No",
+                value="Yes — run `/server update`" if status.get("update_available") else "No",
                 inline=True,
             )
+            embed.add_field(
+                name="Backing up now",
+                value="Yes" if status.get("backing_up") else "No",
+                inline=True,
+            )
+            # Crafty names this field `last_backup`, but it holds
+            # `last_backup_failed` -- a boolean, not a date.
+            if status.get("last_backup"):
+                embed.add_field(
+                    name="Last backup",
+                    value="⚠️ Failed — check Crafty",
+                    inline=True,
+                )
         await interaction.edit_original_response(embed=embed)
+
+    @group.command(name="history", description="CPU, RAM and player charts for the last hour")
+    @app_commands.describe(server="Crafty server (defaults to the configured one)")
+    @app_commands.autocomplete(server=server_autocomplete)
+    async def history(
+        self, interaction: discord.Interaction, server: str | None = None
+    ) -> None:
+        if not await self.guard(interaction, Tier.EVERYONE):
+            return
+        await interaction.response.defer()
+        try:
+            server_id = await self.resolve(server)
+            samples = await self.crafty.get_history(server_id)
+            name = await self.server_label(server_id)
+        except BotError as exc:
+            await self._fail(interaction, exc)
+            return
+        await interaction.edit_original_response(
+            embed=embeds.history_embed(samples, name)
+        )
+
+    @group.command(name="properties", description="Read server.properties")
+    @app_commands.describe(server="Crafty server (defaults to the configured one)")
+    @app_commands.autocomplete(server=server_autocomplete)
+    async def properties(
+        self, interaction: discord.Interaction, server: str | None = None
+    ) -> None:
+        if not await self.guard(interaction, Tier.SERVER):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            server_id = await self.resolve(server)
+            props = await self.crafty.read_properties(server_id)
+            name = await self.server_label(server_id)
+        except BotError as exc:
+            await self._fail(interaction, exc)
+            return
+        await interaction.edit_original_response(
+            embed=embeds.properties_embed(props, name)
+        )
+
+    @group.command(name="roster", description="Read the whitelist, operators or ban list")
+    @app_commands.describe(
+        which="Which list to read",
+        server="Crafty server (defaults to the configured one)",
+    )
+    @app_commands.choices(which=ROSTER_CHOICES)
+    @app_commands.autocomplete(server=server_autocomplete)
+    async def roster(
+        self,
+        interaction: discord.Interaction,
+        which: app_commands.Choice[str],
+        server: str | None = None,
+    ) -> None:
+        if not await self.guard(interaction, Tier.SERVER):
+            return
+        await interaction.response.defer(ephemeral=True)
+        title, filename, empty_hint = ROSTER_FILES[which.value]
+        try:
+            server_id = await self.resolve(server)
+            name = await self.server_label(server_id)
+        except BotError as exc:
+            await self._fail(interaction, exc)
+            return
+
+        try:
+            players = await self.crafty.read_player_list(server_id, filename)
+        except CraftyNotFound:
+            # Minecraft only writes these files once the list is first used.
+            await interaction.edit_original_response(
+                embed=embeds.warning_embed(
+                    title, f"`{filename}` does not exist yet — {empty_hint}"
+                )
+            )
+            return
+        except BotError as exc:
+            await self._fail(interaction, exc)
+            return
+        await interaction.edit_original_response(
+            embed=embeds.player_list_embed(title, players, name, empty_hint=empty_hint)
+        )
 
     @group.command(name="resources", description="CPU, RAM and disk of the Crafty host")
     async def resources(self, interaction: discord.Interaction) -> None:
@@ -397,6 +512,73 @@ class ServerCog(ServiceCog):
             await interaction.edit_original_response(embed=embed, view=None)
         else:
             await interaction.edit_original_response(embed=embed)
+
+    @group.command(
+        name="update", description="Install the server jar update Crafty found"
+    )
+    @app_commands.describe(server="Crafty server (defaults to the configured one)")
+    @app_commands.autocomplete(server=server_autocomplete)
+    async def update(
+        self, interaction: discord.Interaction, server: str | None = None
+    ) -> None:
+        if not await self.guard(interaction, Tier.ADMIN):
+            return
+        await interaction.response.defer()
+
+        try:
+            server_id = await self.resolve(server)
+            data = await self.crafty.get_server(server_id)
+            name = await self.server_label(server_id)
+        except BotError as exc:
+            await self._fail(interaction, exc)
+            return
+
+        status = data.get("status") or {}
+        if isinstance(status, dict) and not status.get("update_available"):
+            await interaction.edit_original_response(
+                embed=embeds.success_embed(
+                    "Already up to date", f"Crafty reports no pending update for **{name}**."
+                )
+            )
+            return
+
+        async def confirmed(button_interaction: discord.Interaction) -> None:
+            await button_interaction.response.defer()
+            try:
+                await self.crafty.send_action(server_id, "update_executable")
+            except BotError as exc:
+                await self._fail(button_interaction, exc)
+                return
+            logger.info(
+                "User %s started a jar update on server %s", interaction.user.id, server_id
+            )
+            await button_interaction.edit_original_response(
+                embed=embeds.success_embed(
+                    "Update started",
+                    "Crafty is downloading and swapping the server executable. "
+                    "It backs the old one up first and restarts the server when done — "
+                    "watch `/server status`.",
+                ),
+                view=None,
+            )
+
+        view = ConfirmView(
+            checker=self.bot.permissions,
+            owner_id=interaction.user.id,
+            tier=Tier.ADMIN,
+            on_confirm=confirmed,
+            confirm_label="Update now",
+        )
+        await interaction.edit_original_response(
+            embed=embeds.confirm_embed(
+                f"Update {name}?",
+                "Crafty will stop the server, replace its executable and start it "
+                "again. **Take a backup first** if you have not run one recently — "
+                "plugins and mods can break on a version change.",
+            ),
+            view=view,
+        )
+        view.message = await interaction.original_response()
 
     # ------------------------------------------------------------------ #
     # Backups
