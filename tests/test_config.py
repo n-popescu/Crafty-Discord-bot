@@ -36,6 +36,7 @@ def clean_env(monkeypatch):
         "IDLE_SHUTDOWN_ENABLED",
         "LOG_LEVEL",
         "STATUS_CACHE_TTL",
+        "CRAFTY_UTC_OFFSET",
     ]:
         monkeypatch.delenv(name, raising=False)
 
@@ -155,3 +156,20 @@ def test_numeric_settings_are_validated(monkeypatch):
 def test_log_level_is_normalised(monkeypatch):
     set_required(monkeypatch, LOG_LEVEL="debug")
     assert load_config().log_level == "DEBUG"
+
+
+def test_crafty_utc_offset_defaults_to_unset(monkeypatch):
+    """Unset means "assume the same clock", which is the historical behaviour."""
+    set_required(monkeypatch)
+    assert load_config().crafty_utc_offset is None
+
+
+def test_crafty_utc_offset_accepts_a_fractional_offset(monkeypatch):
+    set_required(monkeypatch, CRAFTY_UTC_OFFSET="-3.5")
+    assert load_config().crafty_utc_offset == -3.5
+
+
+def test_crafty_utc_offset_rejects_junk(monkeypatch):
+    set_required(monkeypatch, CRAFTY_UTC_OFFSET="Europe/Paris")
+    with pytest.raises(ConfigError):
+        load_config()

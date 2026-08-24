@@ -82,17 +82,53 @@ class FakeCrafty:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
-        self.bodies: list[str] = []
+        self.bodies: list = []
         self.auth_headers: list[str | None] = []
         self.stats = RUNNING_STATS
         self.fail_times = 0
         self.status_override: tuple[int, dict] | None = None
+        self.files: dict[str, str] = {
+            "server.properties": (
+                "#Minecraft server properties\n"
+                "#Wed Aug 20 21:00:00 UTC 2026\n"
+                "motd=A Minecraft Server\n"
+                "difficulty=hard\n"
+                "max-players=20\n"
+                "enable-rcon=false\n"
+                "\n"
+            ),
+            "whitelist.json": '[{"uuid": "uuid-1", "name": "PlayerOne"}]',
+            "ops.json": "[]",
+        }
+        self.webhooks: dict[str, dict] = {
+            "3": {
+                "webhook_type": "Discord",
+                "name": "Lifecycle",
+                "url": "https://discord.com/api/webhooks/1/secret",
+                "bot_name": "Crafty",
+                "trigger": "start_server,stop_server,crash_detected,",
+                "body": "{server_name}",
+                "color": "#005cd1",
+                "enabled": True,
+            }
+        }
 
         app = web.Application()
         app.router.add_get("/api/v2/crafty/check", self._check)
         app.router.add_get("/api/v2/crafty/stats", self._host_stats)
         app.router.add_get("/api/v2/servers", self._servers)
+        app.router.add_get("/api/v2/servers/status", self._servers_status)
         app.router.add_get("/api/v2/servers/{sid}", self._server)
+        app.router.add_get("/api/v2/servers/{sid}/history", self._history)
+        app.router.add_post("/api/v2/servers/{sid}/files", self._files)
+        app.router.add_get("/api/v2/servers/{sid}/webhook", self._webhooks)
+        app.router.add_post("/api/v2/servers/{sid}/webhook", self._create_webhook)
+        app.router.add_patch("/api/v2/servers/{sid}/webhook/{wid}", self._edit_webhook)
+        app.router.add_delete("/api/v2/servers/{sid}/webhook/{wid}", self._delete_webhook)
+        app.router.add_post("/api/v2/servers/{sid}/webhook/{wid}", self._test_webhook)
+        app.router.add_post("/api/v2/servers/{sid}/tasks", self._create_task)
+        app.router.add_patch("/api/v2/servers/{sid}/tasks/{tid}", self._edit_task)
+        app.router.add_delete("/api/v2/servers/{sid}/tasks/{tid}", self._delete_task)
         app.router.add_get("/api/v2/servers/{sid}/stats", self._server_stats)
         app.router.add_post("/api/v2/servers/{sid}/action/{action}", self._action)
         app.router.add_post("/api/v2/servers/{sid}/action/{action}/{aid}", self._action)
@@ -191,6 +227,117 @@ class FakeCrafty:
                 },
             }
         )
+
+    async def _servers_status(self, request: web.Request) -> web.Response:
+        self._record(request)
+        return web.json_response(
+            {
+                "status": "ok",
+                "data": [
+                    {
+                        "id": SERVER_ID,
+                        "world_name": "Survival",
+                        "running": True,
+                        "online": 3,
+                        "max": 20,
+                        "version": "Paper 1.21.4",
+                        "desc": "A Minecraft Server",
+                        "icon": False,
+                    },
+                    {
+                        "id": "other-server",
+                        "world_name": "Creative",
+                        "running": False,
+                        "online": 0,
+                        "max": 10,
+                        "version": "",
+                        "desc": "Unable to Connect",
+                        "icon": False,
+                    },
+                ],
+            }
+        )
+
+    async def _history(self, request: web.Request) -> web.Response:
+        self._record(request)
+        # Deliberately out of order: the real handler does not sort its query.
+        return web.json_response(
+            {
+                "status": "ok",
+                "data": [
+                    {
+                        "created": "2026-08-20 21:10:00",
+                        "running": True,
+                        "cpu": 30.0,
+                        "mem_percent": 62.0,
+                        "online": 4,
+                    },
+                    {
+                        "created": "2026-08-20 21:00:00",
+                        "running": True,
+                        "cpu": 10.0,
+                        "mem_percent": 55.0,
+                        "online": 1,
+                    },
+                ],
+            }
+        )
+
+    async def _files(self, request: web.Request) -> web.Response:
+        self._record(request)
+        body = await request.json()
+        self.bodies.append(body)
+        path = body["path"]
+        if path == "plugins":
+            return web.json_response(
+                {"status": "ok", "data": {"root_path": {"path": "plugins"}}}
+            )
+        if path not in self.files:
+            return web.json_response(
+                {"status": "error", "error": "DECODE_ERROR"}, status=400
+            )
+        return web.json_response(
+            {
+                "status": "ok",
+                "data": {"content": self.files[path], "attributes": {"size": "1KB"}},
+            }
+        )
+
+    async def _webhooks(self, request: web.Request) -> web.Response:
+        self._record(request)
+        return web.json_response({"status": "ok", "data": self.webhooks})
+
+    async def _create_webhook(self, request: web.Request) -> web.Response:
+        self._record(request)
+        self.bodies.append(await request.json())
+        return web.json_response({"status": "ok", "data": {"webhook_id": 7}})
+
+    async def _edit_webhook(self, request: web.Request) -> web.Response:
+        self._record(request)
+        self.bodies.append(await request.json())
+        return web.json_response({"status": "ok"})
+
+    async def _delete_webhook(self, request: web.Request) -> web.Response:
+        self._record(request)
+        return web.json_response({"status": "ok"})
+
+    async def _test_webhook(self, request: web.Request) -> web.Response:
+        self._record(request)
+        return web.json_response({"status": "ok"})
+
+    async def _create_task(self, request: web.Request) -> web.Response:
+        self._record(request)
+        self.bodies.append(await request.json())
+        return web.json_response({"status": "ok", "data": {"schedule_id": 12}})
+
+    async def _edit_task(self, request: web.Request) -> web.Response:
+        self._record(request)
+        self.bodies.append(await request.json())
+        return web.json_response({"status": "ok"})
+
+    async def _delete_task(self, request: web.Request) -> web.Response:
+        self._record(request)
+        return web.json_response({"status": "ok"})
 
     async def _run_task(self, request: web.Request) -> web.Response:
         self._record(request)
@@ -543,3 +690,191 @@ async def test_no_request_is_sent_while_the_host_is_offline(fake_crafty, crafty_
         assert fake_crafty.calls
     finally:
         await svc.close()
+
+
+# --------------------------------------------------------------------------- #
+# Multi-server overview
+# --------------------------------------------------------------------------- #
+async def test_server_status_lists_every_server_in_one_request(service, fake_crafty):
+    lines = await service.list_server_status()
+    assert [line.server_id for line in lines] == [SERVER_ID, "other-server"]
+    assert lines[0].running is True
+    assert (lines[0].online, lines[0].max_players) == (3, 20)
+    assert lines[1].running is False
+    # One call for however many servers exist.
+    assert fake_crafty.calls == [("GET", "/api/v2/servers/status")]
+
+
+async def test_server_status_is_not_authenticated(service, fake_crafty):
+    """Crafty's status endpoint takes no auth, so no token is put on the wire."""
+    await service.list_server_status()
+    assert fake_crafty.auth_headers == [None]
+
+
+# --------------------------------------------------------------------------- #
+# History
+# --------------------------------------------------------------------------- #
+async def test_history_is_sorted_oldest_first(service):
+    samples = await service.get_history(SERVER_ID)
+    assert [sample.cpu_percent for sample in samples] == [10.0, 30.0]
+    assert [sample.online for sample in samples] == [1, 4]
+    assert samples[0].at is not None and samples[0].at < samples[1].at
+
+
+# --------------------------------------------------------------------------- #
+# Logs
+# --------------------------------------------------------------------------- #
+async def test_logs_are_html_unescaped(service):
+    """Crafty escapes log lines for its web terminal; Discord needs them raw."""
+    lines = await service.get_logs(SERVER_ID, lines=5)
+    assert all("&quot;" not in line for line in lines)
+
+
+async def test_logs_unescape_real_entities(service, fake_crafty, monkeypatch):
+    async def escaped(*args, **kwargs):
+        return {
+            "status": "ok",
+            "data": ["&lt;Steve&gt; said &quot;hi&quot; &amp; left", "plain line"],
+        }
+
+    monkeypatch.setattr(service, "_request", escaped)
+    assert await service.get_logs(SERVER_ID) == (
+        '<Steve> said "hi" & left',
+        "plain line",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Server files
+# --------------------------------------------------------------------------- #
+async def test_read_properties_parses_and_skips_comments(service):
+    properties = await service.read_properties(SERVER_ID)
+    assert properties["difficulty"] == "hard"
+    assert properties["motd"] == "A Minecraft Server"
+    assert properties["max-players"] == "20"
+    assert not any(key.startswith("#") for key in properties)
+
+
+async def test_read_file_rejects_a_directory(service):
+    with pytest.raises(CraftyAPIError):
+        await service.read_file(SERVER_ID, "plugins")
+
+
+async def test_read_file_reports_a_missing_file_as_not_found(service):
+    """Crafty answers 400 DECODE_ERROR for a file that was never created."""
+    with pytest.raises(CraftyNotFound):
+        await service.read_file(SERVER_ID, "banned-players.json")
+
+
+async def test_read_player_list_parses_entries(service):
+    players = await service.read_player_list(SERVER_ID, "whitelist.json")
+    assert [(p.name, p.uuid) for p in players] == [("PlayerOne", "uuid-1")]
+    assert await service.read_player_list(SERVER_ID, "ops.json") == ()
+
+
+# --------------------------------------------------------------------------- #
+# Webhooks
+# --------------------------------------------------------------------------- #
+async def test_list_webhooks_splits_the_trigger_string(service):
+    webhooks = await service.list_webhooks(SERVER_ID)
+    assert len(webhooks) == 1
+    assert webhooks[0].webhook_id == "3"
+    # Crafty stores triggers as "a,b,c," -- the trailing empty field must go.
+    assert webhooks[0].triggers == ("start_server", "stop_server", "crash_detected")
+
+
+async def test_create_webhook_sends_every_field_crafty_requires(service, fake_crafty):
+    webhook_id = await service.create_webhook(
+        SERVER_ID,
+        name="Lifecycle",
+        url="https://discord.com/api/webhooks/1/secret",
+        triggers=["start_server", "crash_detected"],
+    )
+    assert webhook_id == "7"
+    body = fake_crafty.bodies[-1]
+    # Crafty's schema demands at least 7 of its 8 properties and rejects extras.
+    assert set(body) == {
+        "webhook_type",
+        "name",
+        "url",
+        "bot_name",
+        "trigger",
+        "body",
+        "color",
+        "enabled",
+    }
+    assert body["trigger"] == ["start_server", "crash_detected"]
+
+
+async def test_create_webhook_rejects_an_unknown_event(service):
+    with pytest.raises(CraftyAPIError):
+        await service.create_webhook(
+            SERVER_ID, name="x", url="https://example.invalid", triggers=["explode"]
+        )
+
+
+async def test_create_webhook_requires_at_least_one_event(service):
+    with pytest.raises(CraftyAPIError):
+        await service.create_webhook(
+            SERVER_ID, name="x", url="https://example.invalid", triggers=[]
+        )
+
+
+async def test_webhook_toggle_and_delete(service, fake_crafty):
+    await service.set_webhook_enabled(SERVER_ID, "3", False)
+    assert fake_crafty.bodies[-1] == {"enabled": False}
+    await service.delete_webhook(SERVER_ID, "3")
+    await service.test_webhook(SERVER_ID, "3")
+    assert ("DELETE", f"/api/v2/servers/{SERVER_ID}/webhook/3") in fake_crafty.calls
+    assert ("POST", f"/api/v2/servers/{SERVER_ID}/webhook/3") in fake_crafty.calls
+
+
+# --------------------------------------------------------------------------- #
+# Scheduler writes
+# --------------------------------------------------------------------------- #
+async def test_create_task_derives_the_command_from_the_action(service, fake_crafty):
+    """Crafty's scheduler dispatches `command`, not `action`."""
+    task_id = await service.create_task(
+        SERVER_ID, name="Nightly restart", action="restart", cron="0 5 * * *"
+    )
+    assert task_id == "12"
+    body = fake_crafty.bodies[-1]
+    assert body["action"] == "restart"
+    assert body["command"] == "restart_server"
+    assert body["cron_string"] == "0 5 * * *"
+
+
+async def test_create_task_keeps_a_console_command_verbatim(service, fake_crafty):
+    await service.create_task(
+        SERVER_ID, name="Announce", action="command", cron="0 * * * *", command="/say hi"
+    )
+    # The leading slash is stripped, exactly as for `/server command`.
+    assert fake_crafty.bodies[-1]["command"] == "say hi"
+
+
+async def test_create_task_validates_its_inputs(service):
+    with pytest.raises(CraftyAPIError):
+        await service.create_task(SERVER_ID, name="x", action="explode", cron="0 5 * * *")
+    with pytest.raises(CraftyAPIError):
+        # A `command` task with no command.
+        await service.create_task(SERVER_ID, name="x", action="command", cron="0 5 * * *")
+    with pytest.raises(CraftyAPIError):
+        # A `backup` task with no backup configuration.
+        await service.create_task(SERVER_ID, name="x", action="backup", cron="0 5 * * *")
+    with pytest.raises(CraftyAPIError):
+        # Neither a cron string nor an interval.
+        await service.create_task(SERVER_ID, name="x", action="stop")
+
+
+async def test_backup_task_passes_the_backup_id(service, fake_crafty):
+    await service.create_task(
+        SERVER_ID, name="Nightly", action="backup", cron="0 4 * * *", action_id="b-2"
+    )
+    assert fake_crafty.bodies[-1]["action_id"] == "b-2"
+
+
+async def test_task_toggle_and_delete(service, fake_crafty):
+    await service.set_task_enabled(SERVER_ID, "12", False)
+    assert fake_crafty.bodies[-1] == {"enabled": False}
+    await service.delete_task(SERVER_ID, "12")
+    assert ("DELETE", f"/api/v2/servers/{SERVER_ID}/tasks/12") in fake_crafty.calls

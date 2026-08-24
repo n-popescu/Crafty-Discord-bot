@@ -14,7 +14,15 @@ from bot.config import PermissionConfig
 from bot.errors import CraftyUnavailable
 from bot.permissions import PermissionChecker, Tier
 from bot.services.azure import VmStatus
-from bot.services.crafty import BackupConfig, HostStats, Player, ServerStats
+from bot.services.crafty import (
+    BackupConfig,
+    HistorySample,
+    HostStats,
+    Player,
+    ServerStats,
+    ServerStatusLine,
+    Webhook,
+)
 from bot.services.orchestrator import InfraSnapshot, Step, StepState
 from bot.ui import embeds
 from bot.utils import human_bytes, human_duration, parse_timestamp, poll_until
@@ -333,3 +341,106 @@ def test_health_embed_marks_unconfigured_azure():
     text = str(embed.to_dict())
     assert "Not configured" in text
     assert "42" in text
+
+
+# --------------------------------------------------------------------------- #
+# New embeds
+# --------------------------------------------------------------------------- #
+def test_servers_overview_counts_running_servers_and_players():
+    lines = [
+        ServerStatusLine(
+            server_id="a", world_name="Survival", running=True, online=3, max_players=20
+        ),
+        ServerStatusLine(server_id="b", world_name="Creative", running=False),
+    ]
+    embed = embeds.servers_overview_embed(lines)
+    assert "1/2 up" in embed.title
+    assert "3 players online in total" in embed.footer.text
+
+
+def test_servers_overview_explains_an_empty_list():
+    embed = embeds.servers_overview_embed([])
+    assert "Show status" in embed.description
+
+
+def test_history_embed_draws_one_chart_per_metric():
+    samples = [
+        HistorySample(
+            at=datetime(2026, 8, 20, 21, 0), cpu_percent=10.0, memory_percent=50.0, online=1
+        ),
+        HistorySample(
+            at=datetime(2026, 8, 20, 21, 10), cpu_percent=30.0, memory_percent=60.0, online=4
+        ),
+    ]
+    embed = embeds.history_embed(samples, "Survival")
+    names = [field.name for field in embed.fields]
+    assert any("CPU" in name for name in names)
+    assert any("RAM" in name for name in names)
+    assert any("Players" in name for name in names)
+    # Latest value first, peak second.
+    assert "now 30%" in names[0] and "peak 30%" in names[0]
+    assert "21:00–21:10" in embed.footer.text
+
+
+def test_history_embed_handles_no_samples():
+    embed = embeds.history_embed([], "Survival")
+    assert "No history" in embed.title
+
+
+def test_history_embed_skips_a_metric_crafty_never_recorded():
+    samples = [HistorySample(at=datetime(2026, 8, 20, 21, 0), cpu_percent=10.0)]
+    names = [field.name for field in embeds.history_embed(samples, "Survival").fields]
+    assert not any("RAM" in name for name in names)
+
+
+def test_properties_embed_highlights_the_interesting_keys():
+    embed = embeds.properties_embed(
+        {"motd": "Hello", "difficulty": "hard", "enable-rcon": "false"}, "Survival"
+    )
+    names = [field.name for field in embed.fields]
+    assert "motd" in names and "difficulty" in names
+    # Everything else is folded into a single block.
+    assert any(name.startswith("Other") for name in names)
+
+
+def test_player_list_embed_explains_an_empty_list():
+    embed = embeds.player_list_embed(
+        "✅ Whitelist", [], "Survival", empty_hint="nobody has been whitelisted yet."
+    )
+    assert "whitelisted" in embed.description
+
+
+def test_player_list_embed_truncates_a_long_list():
+    players = [Player(name=f"Player{i}") for i in range(60)]
+    embed = embeds.player_list_embed(
+        "🚫 Banned players", players, "Survival", empty_hint="nobody is banned."
+    )
+    assert "and 20 more" in embed.description
+    assert "60 entries" in embed.footer.text
+
+
+def test_webhooks_embed_never_prints_the_url():
+    """A webhook URL lets anyone post into the channel: it is a credential."""
+    webhook = Webhook(
+        webhook_id="3",
+        name="Lifecycle",
+        url="https://discord.com/api/webhooks/1/super-secret",
+        triggers=("start_server", "stop_server"),
+    )
+    embed = embeds.webhooks_embed([webhook], "Survival")
+    rendered = repr(embed.to_dict())
+    assert "super-secret" not in rendered
+    assert "start_server" in rendered
+
+
+def test_webhooks_embed_pitches_the_feature_when_none_exist():
+    embed = embeds.webhooks_embed([], "Survival")
+    assert "no polling" in embed.description
+
+
+def test_uptime_offset_reaches_the_status_embed():
+    started = datetime.now() + timedelta(hours=2) - timedelta(hours=1)
+    stats = ServerStats(server_id="a", name="Survival", running=True, started_at=started)
+    snapshot = InfraSnapshot(server_id="a", stats=stats)
+    embed = embeds.status_embed(snapshot, clock_offset=2)
+    assert "1h 0m" in embed.fields[0].value

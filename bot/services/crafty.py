@@ -20,23 +20,36 @@ Endpoints used
 ``POST /api/v2/servers/{id}/stdin``                     console command
 ``GET  /api/v2/servers/{id}/logs``                      terminal buffer or log file
 ``GET  /api/v2/servers/{id}/backups``                   backup configurations
+``GET  /api/v2/servers/status``                         every server in one call
+``GET  /api/v2/servers/{id}/history``                   last hour of samples
+``POST /api/v2/servers/{id}/files``                     read a server file
+``GET  /api/v2/servers/{id}/webhook``                   Crafty's own webhooks
+``POST /api/v2/servers/{id}/webhook``                   create a webhook
+``PATCH/DELETE .../webhook/{id}``                       edit / delete a webhook
+``POST /api/v2/servers/{id}/webhook/{id}``              send a test webhook
 ``GET  /api/v2/servers/{id}/tasks/{taskId}``            one scheduled task
+``POST /api/v2/servers/{id}/tasks``                     create a scheduled task
+``PATCH/DELETE .../tasks/{taskId}``                     edit / delete a task
 ``POST /api/v2/servers/{id}/tasks/{taskId}/run``        run a scheduled task now
 ======================================================= ==============================
 
 Deliberately not used
 ---------------------
 * ``GET /api/v2/servers/{id}/tasks`` and ``/tasks/{id}/children`` are stub
-  handlers in 4.10.8 (``def get(...): pass``), so listing schedules is not
-  supported by the API and is not faked here.
+  handlers in 4.10.8 (``def get(...): pass``), so *listing* schedules is not
+  supported by the API and is not faked here -- creating, editing, deleting and
+  running individual tasks all work and are exposed.
 * The console WebSocket authenticates with a browser cookie and requires a
   permanently open connection, which suits neither an API token nor a Pi Zero W.
+  Crafty's own webhooks cover the same ground by *pushing* events to Discord,
+  which is why they are wired up here instead.
 """
 
 from __future__ import annotations
 
 import ast
 import asyncio
+import html
 import json
 import logging
 from dataclasses import dataclass, field
@@ -71,6 +84,27 @@ SERVER_ACTIONS = frozenset(
         "update_executable",
     }
 )
+
+#: Events Crafty can fire a webhook for (``WebhookFactory.get_monitored_events``).
+WEBHOOK_EVENTS = (
+    "start_server",
+    "stop_server",
+    "crash_detected",
+    "backup_server",
+    "jar_update",
+    "send_command",
+    "kill",
+)
+
+#: Actions a scheduled task can perform.
+#:
+#: Crafty stores an ``action`` (what the panel shows) *and* a ``command`` (what
+#: the scheduler actually runs). Its own front-end derives the second from the
+#: first as ``f"{action}_server"`` unless the action is ``command``, in which
+#: case the command is the console text; :meth:`CraftyService.create_task`
+#: reproduces exactly that, so bot-made tasks are indistinguishable from
+#: panel-made ones.
+TASK_ACTIONS = ("start", "stop", "restart", "backup", "command")
 
 _SERVERS_TTL = 60.0
 _SERVER_TTL = 300.0
@@ -215,6 +249,54 @@ class ScheduledTask:
     cron: str = ""
     next_run: str = ""
     raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ServerStatusLine:
+    """One entry of ``GET /servers/status``.
+
+    That endpoint answers for *every* server in a single unauthenticated call,
+    which makes a multi-server overview cost one request instead of one per
+    server -- the difference between usable and painful on a Pi Zero W.
+    """
+
+    server_id: str
+    world_name: str | None = None
+    running: bool = False
+    online: int | None = None
+    max_players: int | None = None
+    version: str | None = None
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class HistorySample:
+    """One row of ``GET /servers/{id}/history`` (Crafty keeps ~1 hour)."""
+
+    at: datetime | None = None
+    running: bool = False
+    cpu_percent: float | None = None
+    memory_percent: float | None = None
+    online: int | None = None
+
+
+@dataclass(frozen=True)
+class Webhook:
+    """A Crafty webhook (``GET /servers/{id}/webhook``).
+
+    Crafty fires these itself when a server starts, stops or crashes, so the bot
+    does not have to poll for those events at all.
+    """
+
+    webhook_id: str
+    name: str = ""
+    provider: str = "Discord"
+    url: str = ""
+    bot_name: str = ""
+    triggers: tuple[str, ...] = ()
+    body: str = ""
+    color: str = "#005cd1"
+    enabled: bool = True
 
 
 def _parse_players(raw: Any) -> tuple[Player, ...]:
@@ -408,7 +490,7 @@ class CraftyService:
             raise CraftyAPIError("Crafty refused the request: the server is busy.")
         if status == 400:
             raise CraftyAPIError(
-                f"Crafty rejected the request{f' ({code})' if code else ''}."
+                f"Crafty rejected the request{f' ({code})' if code else ''}.", code=code
             )
         if status >= 500:
             raise CraftyAPIError("Crafty reported an internal error (HTTP 5xx).")
@@ -422,7 +504,8 @@ class CraftyService:
                 raise CraftyAuthError()
             logger.debug("Crafty %s -> status=error (%s)", path, code or "no code")
             raise CraftyAPIError(
-                f"Crafty could not complete the request{f' ({code})' if code else ''}."
+                f"Crafty could not complete the request{f' ({code})' if code else ''}.",
+                code=code,
             )
 
     @staticmethod
@@ -500,6 +583,56 @@ class CraftyService:
             )
 
         return await self._cache.get_or_fetch("servers", _SERVERS_TTL, fetch)
+
+    async def list_server_status(self) -> tuple[ServerStatusLine, ...]:
+        """Status of every server Crafty shows publicly, in a single request.
+
+        ``GET /servers/status`` is the endpoint Crafty's own public dashboard
+        uses: it is unauthenticated and only lists servers whose "show status"
+        flag is on, so a server hidden in Crafty stays hidden here too.
+        """
+        body = await self._request("GET", f"{API}/servers/status", authenticated=False)
+        data = self._payload(body)
+        if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
+            return ()
+        return tuple(
+            ServerStatusLine(
+                server_id=str(item.get("id")),
+                world_name=_as_text(item.get("world_name")),
+                running=bool(item.get("running")),
+                online=_as_int(item.get("online")),
+                max_players=_as_int(item.get("max")),
+                version=_as_text(item.get("version")),
+                description=_as_text(item.get("desc")),
+            )
+            for item in data
+            if isinstance(item, Mapping) and item.get("id")
+        )
+
+    async def get_history(self, server_id: str) -> tuple[HistorySample, ...]:
+        """Return Crafty's stored samples for a server (roughly the last hour).
+
+        Crafty already records these for its own graphs, so reading them costs
+        one request and no extra work on the host.
+        """
+        body = await self._request("GET", f"{API}/servers/{server_id}/history")
+        data = self._payload(body)
+        if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
+            return ()
+        samples = [
+            HistorySample(
+                at=parse_timestamp(item.get("created")),
+                running=bool(item.get("running")),
+                cpu_percent=_as_float(item.get("cpu")),
+                memory_percent=_as_float(item.get("mem_percent")),
+                online=_as_int(item.get("online")),
+            )
+            for item in data
+            if isinstance(item, Mapping)
+        ]
+        # The handler does not order its query, so sort by timestamp before use.
+        samples.sort(key=lambda sample: sample.at or datetime.min)
+        return tuple(samples)
 
     async def get_server(self, server_id: str) -> Mapping[str, Any]:
         """Read a server's configuration (cached for 5 minutes)."""
@@ -640,7 +773,12 @@ class CraftyService:
             data = data.splitlines()
         if not isinstance(data, Sequence):
             return ()
-        cleaned = [str(line).rstrip() for line in data if str(line).strip()]
+        # Crafty HTML-escapes every line (`&quot;`, `&#x27;`, `&lt;`) because the
+        # same payload feeds its web terminal. Discord shows those entities
+        # literally inside a code block, so undo the escaping here.
+        cleaned = [
+            html.unescape(str(line)).rstrip() for line in data if str(line).strip()
+        ]
         return tuple(cleaned[-lines:])
 
     # ------------------------------------------------------------------ #
@@ -725,3 +863,238 @@ class CraftyService:
             retries=0,
         )
         logger.info("Scheduled task %s triggered for server %s", task_id, server_id)
+
+    # ------------------------------------------------------------------ #
+    # Server files
+    # ------------------------------------------------------------------ #
+    async def read_file(self, server_id: str, path: str) -> str:
+        """Read one text file from a server directory.
+
+        Crafty exposes this as a ``POST`` because its GET handlers take no body;
+        ``path`` is relative to the server root and Crafty rejects any attempt
+        to escape it. Requires the FILES API permission.
+        """
+        try:
+            body = await self._request(
+                "POST",
+                f"{API}/servers/{server_id}/files",
+                json_body={"path": path},
+                retries=0,
+            )
+        except CraftyAPIError as exc:
+            # Crafty answers 400 DECODE_ERROR both for a file that is not there
+            # and for one it cannot read as UTF-8; "missing" is by far the more
+            # common case and the only one worth a tailored message.
+            if exc.code == "DECODE_ERROR":
+                raise CraftyNotFound(
+                    f"Crafty could not read `{path}` — it may not exist yet."
+                ) from exc
+            raise
+        data = self._payload(body)
+        if not isinstance(data, Mapping):
+            raise CraftyNotFound(f"Crafty returned no contents for `{path}`.")
+        if "content" not in data:
+            # Directory listings come back keyed by filename, with `root_path`.
+            raise CraftyAPIError(f"`{path}` is a directory, not a file.")
+        return str(data.get("content") or "")
+
+    async def read_properties(self, server_id: str) -> dict[str, str]:
+        """Parse ``server.properties`` into an ordered mapping."""
+        text = await self.read_file(server_id, "server.properties")
+        properties: dict[str, str] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            properties[key.strip()] = value.strip()
+        return properties
+
+    async def read_player_list(self, server_id: str, filename: str) -> tuple[Player, ...]:
+        """Read one of Minecraft's JSON player lists (whitelist/ops/bans)."""
+        text = await self.read_file(server_id, filename)
+        try:
+            entries = json.loads(text or "[]")
+        except ValueError as exc:
+            raise CraftyAPIError(f"`{filename}` is not valid JSON.") from exc
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+            return ()
+        players: list[Player] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            name = _as_text(entry.get("name")) or _as_text(entry.get("uuid"))
+            if name:
+                players.append(Player(name=name, uuid=_as_text(entry.get("uuid"))))
+        return tuple(players)
+
+    # ------------------------------------------------------------------ #
+    # Webhooks
+    # ------------------------------------------------------------------ #
+    async def list_webhooks(self, server_id: str) -> tuple[Webhook, ...]:
+        """List the webhooks Crafty fires for this server (CONFIG permission)."""
+        body = await self._request("GET", f"{API}/servers/{server_id}/webhook")
+        data = self._payload(body)
+        if not isinstance(data, Mapping):
+            return ()
+        return tuple(
+            Webhook(
+                webhook_id=str(webhook_id),
+                name=_as_text(entry.get("name")) or "",
+                provider=str(entry.get("webhook_type") or "Discord"),
+                url=str(entry.get("url") or ""),
+                bot_name=_as_text(entry.get("bot_name")) or "",
+                triggers=tuple(
+                    part.strip()
+                    for part in str(entry.get("trigger") or "").split(",")
+                    if part.strip()
+                ),
+                body=str(entry.get("body") or ""),
+                color=str(entry.get("color") or "#005cd1"),
+                enabled=bool(entry.get("enabled", True)),
+            )
+            for webhook_id, entry in data.items()
+            if isinstance(entry, Mapping)
+        )
+
+    async def create_webhook(
+        self,
+        server_id: str,
+        *,
+        name: str,
+        url: str,
+        triggers: Sequence[str],
+        body: str = "",
+        bot_name: str = "Crafty Controller",
+        color: str = "#005cd1",
+        enabled: bool = True,
+        provider: str = "Discord",
+    ) -> str:
+        """Register a webhook and return its id.
+
+        Every field is sent because Crafty's schema demands at least seven of
+        the eight properties and rejects anything it does not know about.
+        """
+        unknown = [event for event in triggers if event not in WEBHOOK_EVENTS]
+        if unknown:
+            raise CraftyAPIError(f"Unknown webhook event: `{unknown[0]}`.")
+        if not triggers:
+            raise CraftyAPIError("A webhook needs at least one event to react to.")
+
+        payload = {
+            "webhook_type": provider,
+            "name": name,
+            "url": url,
+            "bot_name": bot_name,
+            "trigger": list(triggers),
+            "body": body,
+            "color": color,
+            "enabled": enabled,
+        }
+        response = await self._request(
+            "POST", f"{API}/servers/{server_id}/webhook", json_body=payload, retries=0
+        )
+        data = self._payload(response)
+        webhook_id = data.get("webhook_id") if isinstance(data, Mapping) else None
+        logger.info("Webhook created for server %s", server_id)
+        return str(webhook_id) if webhook_id is not None else ""
+
+    async def set_webhook_enabled(
+        self, server_id: str, webhook_id: str, enabled: bool
+    ) -> None:
+        """Enable or disable a webhook without deleting it."""
+        await self._request(
+            "PATCH",
+            f"{API}/servers/{server_id}/webhook/{webhook_id}",
+            json_body={"enabled": enabled},
+            retries=0,
+        )
+
+    async def delete_webhook(self, server_id: str, webhook_id: str) -> None:
+        await self._request(
+            "DELETE", f"{API}/servers/{server_id}/webhook/{webhook_id}", retries=0
+        )
+        logger.info("Webhook %s deleted from server %s", webhook_id, server_id)
+
+    async def test_webhook(self, server_id: str, webhook_id: str) -> None:
+        """Ask Crafty to fire a sample event through this webhook."""
+        await self._request(
+            "POST", f"{API}/servers/{server_id}/webhook/{webhook_id}", retries=0
+        )
+
+    # ------------------------------------------------------------------ #
+    # Scheduler (writes)
+    # ------------------------------------------------------------------ #
+    async def create_task(
+        self,
+        server_id: str,
+        *,
+        name: str,
+        action: str,
+        cron: str = "",
+        interval: int = 0,
+        interval_type: str = "",
+        start_time: str = "00:00",
+        command: str | None = None,
+        action_id: str | None = None,
+        enabled: bool = True,
+        one_time: bool = False,
+    ) -> str:
+        """Create a scheduled task and return its id.
+
+        ``action`` is one of :data:`TASK_ACTIONS`. Either ``cron`` or
+        ``interval``/``interval_type`` describes when the task runs; Crafty
+        validates the cron string itself and answers HTTP 405 when it is
+        malformed. A ``backup`` task needs the ``action_id`` of a backup
+        configuration.
+        """
+        if action not in TASK_ACTIONS:
+            raise CraftyAPIError(f"`{action}` is not a supported task action.")
+        if action == "command":
+            payload_command = (command or "").strip().lstrip("/")
+            if not payload_command:
+                raise CraftyAPIError("A `command` task needs a console command.")
+        else:
+            # Mirror Crafty's own front-end: the scheduler dispatches `command`.
+            payload_command = f"{action}_server"
+        if action == "backup" and not action_id:
+            raise CraftyAPIError("A `backup` task needs a backup configuration id.")
+        if not cron and not interval:
+            raise CraftyAPIError("A task needs either a cron string or an interval.")
+
+        payload: dict[str, Any] = {
+            "name": name,
+            "action": action,
+            "enabled": enabled,
+            "one_time": one_time,
+            "start_time": start_time,
+            "cron_string": cron,
+            "interval": interval,
+            "interval_type": interval_type,
+            "command": payload_command,
+        }
+        if action_id:
+            payload["action_id"] = action_id
+
+        response = await self._request(
+            "POST", f"{API}/servers/{server_id}/tasks", json_body=payload, retries=0
+        )
+        data = self._payload(response)
+        task_id = data.get("schedule_id") if isinstance(data, Mapping) else None
+        logger.info("Scheduled task created for server %s", server_id)
+        return str(task_id) if task_id is not None else ""
+
+    async def set_task_enabled(self, server_id: str, task_id: str, enabled: bool) -> None:
+        """Pause or resume a scheduled task."""
+        await self._request(
+            "PATCH",
+            f"{API}/servers/{server_id}/tasks/{task_id}",
+            json_body={"enabled": enabled},
+            retries=0,
+        )
+
+    async def delete_task(self, server_id: str, task_id: str) -> None:
+        await self._request(
+            "DELETE", f"{API}/servers/{server_id}/tasks/{task_id}", retries=0
+        )
+        logger.info("Scheduled task %s deleted from server %s", task_id, server_id)

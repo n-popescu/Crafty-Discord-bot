@@ -7,8 +7,8 @@ import logging
 import re
 import sys
 import time
-from datetime import datetime
-from typing import Awaitable, Callable, TypeVar
+from datetime import datetime, timedelta
+from typing import Awaitable, Callable, Sequence, TypeVar
 
 T = TypeVar("T")
 
@@ -92,12 +92,80 @@ def human_duration(seconds: float | int | None) -> str:
     return f"{minutes}m"
 
 
-def uptime_since(started: datetime | None) -> str:
-    """Format the elapsed time since ``started``."""
+def uptime_since(started: datetime | None, *, offset_hours: float = 0.0) -> str:
+    """Format the elapsed time since ``started``.
+
+    Crafty reports naive local timestamps from *its* host. When the bot's Pi and
+    the Crafty host sit in different time zones, comparing them directly inflates
+    or negates the uptime, so ``offset_hours`` (``CRAFTY_UTC_OFFSET`` minus the
+    Pi's own offset) shifts the Crafty timestamp onto the bot's clock. A result
+    that is still in the future means the clocks disagree, which is reported as
+    unknown rather than as a wrong number.
+    """
     if started is None:
         return "N/A"
+    if offset_hours:
+        started = started - timedelta(hours=offset_hours)
     now = datetime.now(started.tzinfo) if started.tzinfo else datetime.now()
-    return human_duration((now - started).total_seconds())
+    elapsed = (now - started).total_seconds()
+    if elapsed < 0:
+        return "N/A"
+    return human_duration(elapsed)
+
+
+def clock_offset_hours(crafty_utc_offset: float | None) -> float:
+    """Hours to subtract from a Crafty timestamp to express it on the bot's clock.
+
+    Returns ``0.0`` when ``CRAFTY_UTC_OFFSET`` is unset, which keeps the old
+    behaviour of assuming both machines share a time zone.
+    """
+    if crafty_utc_offset is None:
+        return 0.0
+    local = datetime.now().astimezone().utcoffset()
+    local_hours = local.total_seconds() / 3600 if local else 0.0
+    return crafty_utc_offset - local_hours
+
+
+#: Eight block heights, used to draw a graph as plain text. Rendering an image
+#: would mean pulling matplotlib onto a Pi Zero W; this costs nothing.
+_SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(values: Sequence[float | int | None], *, width: int = 24) -> str:
+    """Render a series as a one-line Unicode bar chart.
+
+    Values are down-sampled to ``width`` buckets by averaging, and ``None``
+    entries (a metric Crafty could not read) are drawn as a gap.
+    """
+    numbers = [None if value is None else float(value) for value in values]
+    if not numbers:
+        return ""
+
+    if len(numbers) > width:
+        bucket = len(numbers) / width
+        buckets: list[float | None] = []
+        for index in range(width):
+            start = int(index * bucket)
+            chunk = numbers[start : max(int((index + 1) * bucket), start + 1)]
+            present = [value for value in chunk if value is not None]
+            buckets.append(sum(present) / len(present) if present else None)
+        numbers = buckets
+
+    present = [value for value in numbers if value is not None]
+    if not present:
+        return " " * len(numbers)
+    low, high = min(present), max(present)
+    span = high - low
+
+    out = []
+    for value in numbers:
+        if value is None:
+            out.append(" ")
+            continue
+        # A flat series should read as a flat line, not as noise.
+        level = 0 if span <= 0 else round((value - low) / span * (len(_SPARK_BLOCKS) - 1))
+        out.append(_SPARK_BLOCKS[level])
+    return "".join(out)
 
 
 def parse_timestamp(raw: object) -> datetime | None:

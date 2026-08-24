@@ -15,6 +15,7 @@ from bot.permissions import Tier
 from bot.services.crafty import HostStats
 from bot.ui import embeds
 from bot.ui.views import StatusView
+from bot.utils import clock_offset_hours
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,9 @@ class StatusCog(ServiceCog):
         snapshot, host = await asyncio.gather(
             self.orchestrator.snapshot(server), self._host_stats()
         )
-        embed = embeds.status_embed(snapshot, host)
+        embed = embeds.status_embed(
+            snapshot, host, clock_offset=clock_offset_hours(self.config.crafty_utc_offset)
+        )
 
         running = bool(snapshot.stats and snapshot.stats.running)
         view = StatusView(
@@ -98,6 +101,31 @@ class StatusCog(ServiceCog):
         await self.run_workflow(interaction, titles[action], runner)
         # Leave the user with a fresh status panel rather than a stale workflow.
         await self._render(interaction, server)
+
+    # ------------------------------------------------------------------ #
+    @app_commands.command(
+        name="servers", description="Every server Crafty knows about, at a glance"
+    )
+    async def servers(self, interaction: discord.Interaction) -> None:
+        """One request for all servers, instead of one request per server.
+
+        ``GET /servers/status`` is Crafty's own public dashboard endpoint, so
+        this stays cheap however many servers are configured.
+        """
+        if not await self.guard(interaction, Tier.EVERYONE):
+            return
+        await interaction.response.defer()
+        try:
+            lines = await self.crafty.list_server_status()
+        except BotError as exc:
+            embed = embeds.error_embed(
+                "Could not list servers",
+                exc.user_message,
+                hint=await self.bot.context_hint(exc),
+            )
+            await interaction.edit_original_response(embed=embed)
+            return
+        await interaction.edit_original_response(embed=embeds.servers_overview_embed(lines))
 
     # ------------------------------------------------------------------ #
     @app_commands.command(name="health", description="Check Discord, Crafty, Azure and Minecraft")

@@ -40,6 +40,17 @@ def _env_int(name: str, default: int, minimum: int | None = None) -> int:
     return value
 
 
+def _env_float(name: str) -> float | None:
+    """Parse an optional float, e.g. a UTC offset such as ``-3.5``."""
+    raw = _env(name)
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number (hours offset from UTC).") from exc
+
+
 def _env_id_set(name: str) -> frozenset[int]:
     """Parse a comma/space separated list of Discord snowflakes."""
     raw = _env(name).replace(",", " ")
@@ -119,6 +130,10 @@ class Config:
     permissions: PermissionConfig
     log_level: str = "INFO"
     status_cache_ttl: float = 10.0
+    #: UTC offset in hours of the machine running Crafty. Crafty reports naive
+    #: local timestamps, so this is what lets a Pi in one time zone show a
+    #: correct uptime for a VM in another. ``None`` = assume the same clock.
+    crafty_utc_offset: float | None = None
     auto_shutdown_vm: bool = False
     auto_shutdown_delay: int = 300
     idle_shutdown_enabled: bool = False
@@ -201,6 +216,7 @@ def load_config(*, require_azure: bool = False) -> Config:
         ),
         log_level=_env("LOG_LEVEL", "INFO").upper(),
         status_cache_ttl=float(_env_int("STATUS_CACHE_TTL", 10, minimum=0)),
+        crafty_utc_offset=_env_float("CRAFTY_UTC_OFFSET"),
         auto_shutdown_vm=_env_bool("AUTO_SHUTDOWN_VM", False),
         auto_shutdown_delay=_env_int("AUTO_SHUTDOWN_DELAY", 300, minimum=0),
         idle_shutdown_enabled=_env_bool("IDLE_SHUTDOWN_ENABLED", False),
