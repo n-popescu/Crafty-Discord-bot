@@ -87,15 +87,29 @@ class StatusView(GuardedView):
         restart: Callable[[discord.Interaction], Awaitable[None]],
         running: bool,
         may_control: bool,
+        timeout_armed: bool = False,
+        toggle_timeout: Callable[[discord.Interaction], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(checker=checker, owner_id=owner_id)
         self._refresh = refresh
         self._start = start
         self._stop = stop
         self._restart = restart
+        self._toggle_timeout = toggle_timeout
+
+        if not may_control or toggle_timeout is None:
+            # Don't advertise controls the caller is not allowed to use.
+            self.remove_item(self.timeout_button)
+        else:
+            # The switch reads as on/off at a glance: green when armed.
+            self.timeout_button.label = (
+                "Auto-shutdown: ON" if timeout_armed else "Auto-shutdown: OFF"
+            )
+            self.timeout_button.style = (
+                discord.ButtonStyle.success if timeout_armed else discord.ButtonStyle.secondary
+            )
 
         if not may_control:
-            # Don't advertise controls the caller is not allowed to use.
             for button in (self.start_button, self.stop_button, self.restart_button):
                 self.remove_item(button)
             return
@@ -131,6 +145,71 @@ class StatusView(GuardedView):
     ) -> None:
         if await self.ensure(interaction, Tier.SERVER):
             await self._restart(interaction)
+
+    @discord.ui.button(
+        label="Auto-shutdown: OFF", emoji="⏱️", style=discord.ButtonStyle.secondary, row=1
+    )
+    async def timeout_button(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
+        if self._toggle_timeout is None:
+            return
+        if await self.ensure(interaction, Tier.SERVER):
+            await self._toggle_timeout(interaction)
+
+
+class TimeoutModal(discord.ui.Modal):
+    """Asks for the idle delay, because a button cannot carry a parameter."""
+
+    minutes: discord.ui.TextInput = discord.ui.TextInput(
+        label="Idle minutes before shutting down",
+        placeholder="90",
+        default="90",
+        min_length=1,
+        max_length=4,
+        required=True,
+    )
+
+    def __init__(
+        self,
+        *,
+        on_submit: Callable[[discord.Interaction, int], Awaitable[None]],
+        max_minutes: int,
+        default: int = 90,
+    ) -> None:
+        super().__init__(title="Arm auto-shutdown")
+        self._on_submit = on_submit
+        self._max_minutes = max_minutes
+        self.minutes.default = str(default)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.minutes.value).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = -1
+        if not 1 <= value <= self._max_minutes:
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    "Not a valid delay",
+                    f"Enter a whole number of minutes between 1 and {self._max_minutes}.",
+                ),
+                ephemeral=True,
+            )
+            return
+        await self._on_submit(interaction, value)
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception
+    ) -> None:  # pragma: no cover - defensive
+        logger.exception("Timeout modal failed", exc_info=error)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    "Something went wrong", "The timeout could not be armed."
+                ),
+                ephemeral=True,
+            )
 
 
 class ConfirmView(GuardedView):

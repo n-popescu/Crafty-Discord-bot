@@ -84,7 +84,11 @@ class ServerCog(ServiceCog):
             await self._fail(interaction, exc)
             return
         await interaction.edit_original_response(
-            embed=embeds.server_embed(stats, clock_offset=self.clock_offset)
+            embed=embeds.server_embed(
+                stats,
+                clock_offset=self.clock_offset,
+                timeout=self.bot.timeouts.get(server_id),
+            )
         )
 
     @group.command(name="players", description="Who is online right now")
@@ -102,7 +106,9 @@ class ServerCog(ServiceCog):
         except BotError as exc:
             await self._fail(interaction, exc)
             return
-        await interaction.edit_original_response(embed=embeds.players_embed(stats))
+        await interaction.edit_original_response(
+            embed=embeds.players_embed(stats, self.bot.timeouts.get(server_id))
+        )
 
     @group.command(name="info", description="Configuration of a Crafty server")
     @app_commands.describe(server="Crafty server (defaults to the configured one)")

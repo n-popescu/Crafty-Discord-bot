@@ -12,6 +12,7 @@ EXPECTED_COMMANDS = {
     "status": set(),
     "servers": set(),
     "health": set(),
+    "timeout": set(),
     "server": {
         "status",
         "players",
@@ -192,3 +193,79 @@ def test_every_roster_choice_maps_to_a_file():
     from bot.cogs.server import ROSTER_CHOICES, ROSTER_FILES
 
     assert {choice.value for choice in ROSTER_CHOICES} == set(ROSTER_FILES)
+
+
+# --------------------------------------------------------------------------- #
+# IDLE_SHUTDOWN_* now pre-arms /timeout instead of running a second watcher
+# --------------------------------------------------------------------------- #
+async def _bot_with_server(config, **overrides):
+    """A bot whose `resolve_server_id` always answers, for startup tests."""
+    from dataclasses import replace
+
+    instance = CraftyBot(replace(config, **overrides))
+
+    async def resolved(_requested=None):
+        return "server-1"
+
+    instance.crafty.resolve_server_id = resolved
+    return instance
+
+
+async def _close(instance):
+    await instance.crafty.close()
+    await instance.azure.close()
+
+
+async def test_idle_shutdown_disabled_arms_nothing(config):
+    bot = await _bot_with_server(config, idle_shutdown_enabled=False)
+    try:
+        await bot._prearm_idle_timeout()
+        assert bot.timeouts.active() == ()
+    finally:
+        await _close(bot)
+
+
+async def test_idle_shutdown_enabled_arms_the_default_server(config):
+    bot = await _bot_with_server(
+        config,
+        idle_shutdown_enabled=True,
+        idle_shutdown_minutes=45,
+        auto_shutdown_vm=True,
+    )
+    try:
+        await bot._prearm_idle_timeout()
+        state = bot.timeouts.get("server-1")
+        assert state is not None
+        assert state.minutes == 45
+        assert state.shutdown_vm is True
+    finally:
+        await _close(bot)
+
+
+async def test_the_configured_default_does_not_override_a_restored_timeout(config):
+    """A timeout someone armed by hand outranks the environment default."""
+    bot = await _bot_with_server(
+        config, idle_shutdown_enabled=True, idle_shutdown_minutes=45
+    )
+    try:
+        bot.timeouts.arm("server-1", 120, shutdown_vm=False)
+        await bot._prearm_idle_timeout()
+        assert bot.timeouts.get("server-1").minutes == 120
+    finally:
+        await _close(bot)
+
+
+async def test_an_unresolvable_server_does_not_break_startup(config):
+    from bot.errors import CraftyNotFound
+
+    bot = await _bot_with_server(config, idle_shutdown_enabled=True)
+
+    async def broken(_requested=None):
+        raise CraftyNotFound()
+
+    bot.crafty.resolve_server_id = broken
+    try:
+        await bot._prearm_idle_timeout()
+        assert bot.timeouts.active() == ()
+    finally:
+        await _close(bot)

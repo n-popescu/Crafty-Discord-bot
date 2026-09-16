@@ -15,6 +15,7 @@ from bot.permissions import PermissionChecker
 from bot.services.azure import AzureService
 from bot.services.crafty import CraftyService
 from bot.services.orchestrator import InfraOrchestrator
+from bot.services.timeout import IdleTimeoutService
 from bot.ui import embeds
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ COGS = (
     "bot.cogs.minecraft",
     "bot.cogs.schedule",
     "bot.cogs.webhooks",
+    "bot.cogs.timeout",
 )
 
 
@@ -46,8 +48,8 @@ class CraftyBot(commands.Bot):
             config.crafty, cache=self.cache, host_available=self.crafty_host_available
         )
         self.orchestrator = InfraOrchestrator(config, self.crafty, self.azure)
+        self.timeouts = IdleTimeoutService(config, self.crafty, self.orchestrator)
         self.permissions = PermissionChecker(config.permissions, config.guild_id)
-        self._idle_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -86,10 +88,35 @@ class CraftyBot(commands.Bot):
 
         await self._log_startup_report()
 
-        if self.config.idle_shutdown_enabled:
-            from bot.tasks import idle_watcher
+        self.timeouts.start()
+        await self._prearm_idle_timeout()
 
-            self._idle_task = asyncio.create_task(idle_watcher(self), name="idle-watcher")
+    async def _prearm_idle_timeout(self) -> None:
+        """Honour ``IDLE_SHUTDOWN_ENABLED`` by arming ``/timeout`` at startup.
+
+        The environment variables that used to drive a separate watcher loop are
+        now just a default for the same mechanism ``/timeout`` uses, so there is
+        only ever one countdown per server and one place that stops anything.
+        """
+        if not self.config.idle_shutdown_enabled:
+            return
+        if self.timeouts.any_armed:
+            # A timeout restored from disk is a deliberate, more recent choice
+            # than the configured default.
+            return
+        try:
+            server_id = await self.crafty.resolve_server_id(None)
+        except BotError as exc:
+            logger.warning(
+                "IDLE_SHUTDOWN_ENABLED is set but no server could be resolved: %s",
+                exc.user_message,
+            )
+            return
+        self.timeouts.arm(
+            server_id,
+            self.config.idle_shutdown_minutes,
+            shutdown_vm=self.config.auto_shutdown_vm,
+        )
 
     async def _log_startup_report(self) -> None:
         """Probe both APIs concurrently; unavailability must not block startup."""
@@ -132,8 +159,7 @@ class CraftyBot(commands.Bot):
         )
 
     async def close(self) -> None:
-        if self._idle_task is not None:
-            self._idle_task.cancel()
+        await self.timeouts.close()
         await self.crafty.close()
         await self.azure.close()
         await super().close()

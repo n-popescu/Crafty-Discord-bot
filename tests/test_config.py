@@ -37,6 +37,10 @@ def clean_env(monkeypatch):
         "LOG_LEVEL",
         "STATUS_CACHE_TTL",
         "CRAFTY_UTC_OFFSET",
+        "IDLE_CHECK_INTERVAL",
+        "TIMEOUT_CHECK_INTERVAL",
+        "TIMEOUT_STATE_FILE",
+        "IDLE_SHUTDOWN_MINUTES",
     ]:
         monkeypatch.delenv(name, raising=False)
 
@@ -173,3 +177,32 @@ def test_crafty_utc_offset_rejects_junk(monkeypatch):
     set_required(monkeypatch, CRAFTY_UTC_OFFSET="Europe/Paris")
     with pytest.raises(ConfigError):
         load_config()
+
+
+def test_timeout_check_interval_defaults_to_one_minute(monkeypatch):
+    set_required(monkeypatch)
+    assert load_config().timeout_check_interval == 60
+
+
+def test_the_old_idle_check_interval_is_still_honoured(monkeypatch):
+    """IDLE_CHECK_INTERVAL drove the watcher /timeout replaced."""
+    set_required(monkeypatch, IDLE_CHECK_INTERVAL="300")
+    assert load_config().timeout_check_interval == 300
+
+
+def test_the_new_name_wins_over_the_old_one(monkeypatch):
+    set_required(monkeypatch, IDLE_CHECK_INTERVAL="300", TIMEOUT_CHECK_INTERVAL="30")
+    assert load_config().timeout_check_interval == 30
+
+
+def test_the_check_interval_has_a_floor(monkeypatch):
+    set_required(monkeypatch, TIMEOUT_CHECK_INTERVAL="1")
+    with pytest.raises(ConfigError):
+        load_config()
+
+
+def test_timeout_persistence_can_be_switched_off(monkeypatch):
+    set_required(monkeypatch)
+    assert load_config().timeout_state_file == "timeout_state.json"
+    set_required(monkeypatch, TIMEOUT_STATE_FILE="")
+    assert load_config().timeout_state_file == ""

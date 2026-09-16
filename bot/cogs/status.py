@@ -14,7 +14,8 @@ from bot.errors import BotError
 from bot.permissions import Tier
 from bot.services.crafty import HostStats
 from bot.ui import embeds
-from bot.ui.views import StatusView
+from bot.services.timeout import MAX_MINUTES
+from bot.ui.views import StatusView, TimeoutModal
 from bot.utils import clock_offset_hours
 
 logger = logging.getLogger(__name__)
@@ -42,11 +43,24 @@ class StatusCog(ServiceCog):
         snapshot, host = await asyncio.gather(
             self.orchestrator.snapshot(server), self._host_stats()
         )
+        timeout = self.bot.timeouts.get(snapshot.server_id)
         embed = embeds.status_embed(
-            snapshot, host, clock_offset=clock_offset_hours(self.config.crafty_utc_offset)
+            snapshot,
+            host,
+            clock_offset=clock_offset_hours(self.config.crafty_utc_offset),
+            timeout=timeout,
         )
 
         running = bool(snapshot.stats and snapshot.stats.running)
+        # Without a resolved server there is nothing to arm a timeout against,
+        # so the switch is left off the message entirely.
+        toggle = None
+        if snapshot.server_id:
+            resolved_id = snapshot.server_id
+
+            async def toggle(i: discord.Interaction) -> None:
+                await self._on_toggle_timeout(i, server, resolved_id)
+
         view = StatusView(
             checker=self.bot.permissions,
             owner_id=interaction.user.id,
@@ -56,6 +70,8 @@ class StatusCog(ServiceCog):
             restart=lambda i: self._on_action(i, server, "restart"),
             running=running,
             may_control=self.bot.permissions.allows(interaction.user, Tier.SERVER),
+            timeout_armed=timeout is not None,
+            toggle_timeout=toggle,
         )
         message = await interaction.edit_original_response(embed=embed, view=view)
         view.message = message
@@ -102,6 +118,50 @@ class StatusCog(ServiceCog):
         # Leave the user with a fresh status panel rather than a stale workflow.
         await self._render(interaction, server)
 
+    async def _on_toggle_timeout(
+        self, interaction: discord.Interaction, server: str | None, server_id: str
+    ) -> None:
+        """The switch: one click disarms, one click opens the modal to arm."""
+        if self.bot.timeouts.get(server_id) is not None:
+            await interaction.response.defer()
+            self.bot.timeouts.disarm(server_id)
+            logger.info(
+                "User %s disarmed the timeout for server %s from /status",
+                interaction.user.id,
+                server_id,
+            )
+            await self._render(interaction, server)
+            return
+
+        async def submitted(modal_interaction: discord.Interaction, minutes: int) -> None:
+            await modal_interaction.response.defer()
+            # Deallocating the VM costs the Azure tier, exactly as it does for
+            # `/timeout` and `/server stop`.
+            shutdown_vm = self.azure.enabled and self.bot.permissions.allows(
+                modal_interaction.user, Tier.AZURE
+            )
+            self.bot.timeouts.arm(
+                server_id,
+                minutes,
+                shutdown_vm=shutdown_vm,
+                armed_by=modal_interaction.user.id,
+            )
+            logger.info(
+                "User %s armed a %d min timeout for server %s from /status",
+                modal_interaction.user.id,
+                minutes,
+                server_id,
+            )
+            await self._render(modal_interaction, server)
+
+        await interaction.response.send_modal(
+            TimeoutModal(
+                on_submit=submitted,
+                max_minutes=MAX_MINUTES,
+                default=self.config.idle_shutdown_minutes,
+            )
+        )
+
     # ------------------------------------------------------------------ #
     @app_commands.command(
         name="servers", description="Every server Crafty knows about, at a glance"
@@ -125,7 +185,11 @@ class StatusCog(ServiceCog):
             )
             await interaction.edit_original_response(embed=embed)
             return
-        await interaction.edit_original_response(embed=embeds.servers_overview_embed(lines))
+        await interaction.edit_original_response(
+            embed=embeds.servers_overview_embed(
+                lines, {state.server_id: state for state in self.bot.timeouts.active()}
+            )
+        )
 
     # ------------------------------------------------------------------ #
     @app_commands.command(name="health", description="Check Discord, Crafty, Azure and Minecraft")
@@ -147,9 +211,11 @@ class StatusCog(ServiceCog):
                 azure_state = f"🔴 {exc.user_message}"
 
         minecraft_state = "⚪ Unknown"
+        timeout = None
         if authenticated:
             try:
                 server_id = await self.resolve(None)
+                timeout = self.bot.timeouts.get(server_id)
                 stats = await self.crafty.get_stats(server_id, ttl=self.config.status_cache_ttl)
                 emoji = embeds.STATE_EMOJI.get(stats.state, "⚪")
                 players = (
@@ -168,6 +234,7 @@ class StatusCog(ServiceCog):
             azure_state=azure_state,
             minecraft_state=minecraft_state,
             latency_ms=self.bot.latency * 1000 if self.bot.latency else None,
+            timeout=timeout,
         )
         await interaction.edit_original_response(embed=embed)
 

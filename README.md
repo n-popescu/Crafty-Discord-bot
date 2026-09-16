@@ -106,6 +106,11 @@ deploy/
   message instead of spamming the channel.
 * **Graceful shutdown** — the VM is never deallocated while Minecraft is running
   unless an administrator explicitly forces it.
+* **Inactivity auto-shutdown** — `/timeout 90`, or the **Auto-shutdown** switch
+  under `/status`, stops the server gracefully through Crafty once it has been
+  empty for 90 minutes and then frees the Azure VM. Its state is shown wherever
+  it is relevant: `/status`, `/server status`, `/server players`, `/servers` and
+  `/health`.
 * **Live progress** — start/stop workflows update a single message step by step
   (`Azure VM → Crafty → Minecraft`) using exponential-backoff polling, never
   fixed sleeps.
@@ -146,6 +151,7 @@ deploy/
 | --- | --- | --- |
 | `/status [server]` | everyone | Full infrastructure overview with action buttons |
 | `/servers` | everyone | Every server Crafty publishes, in one API call |
+| `/timeout [minutes] [shutdown_vm] [server]` | everyone to read; server to arm (+azure for `shutdown_vm`) | Stop the server gracefully after N idle minutes, then free the VM. `minutes:0` cancels, no argument shows the state |
 | `/health` | everyone | Which layer is broken: bot, Crafty, Azure or Minecraft (ephemeral) |
 | `/server status [server]` | everyone | Detailed server statistics |
 | `/server players [server]` | everyone | Online players, with UUIDs when Crafty reports them |
@@ -527,9 +533,10 @@ startup — never by value.
 | `AZURE_CONTROL_ROLE_IDS` | | — | Roles that may control the VM |
 | `AUTO_SHUTDOWN_VM` | | `false` | Deallocate the VM after Minecraft stops |
 | `AUTO_SHUTDOWN_DELAY` | | `300` | Grace period before deallocating (seconds) |
-| `IDLE_SHUTDOWN_ENABLED` | | `false` | Stop an empty server automatically |
-| `IDLE_SHUTDOWN_MINUTES` | | `30` | Minutes without players before stopping |
-| `IDLE_CHECK_INTERVAL` | | `900` | Seconds between idle checks |
+| `IDLE_SHUTDOWN_ENABLED` | | `false` | Pre-arm `/timeout` for the default server at startup |
+| `IDLE_SHUTDOWN_MINUTES` | | `30` | Idle minutes for that pre-armed timeout, and the default in the `/status` dialog |
+| `TIMEOUT_CHECK_INTERVAL` | | `60` | Seconds between player-count checks while a timeout is armed (falls back to `IDLE_CHECK_INTERVAL`) |
+| `TIMEOUT_STATE_FILE` | | `timeout_state.json` | Where armed timeouts are remembered across restarts; empty disables persistence |
 | `STATUS_CACHE_TTL` | | `10` | Seconds a status reading may be reused |
 | `START_TIMEOUT` | | `600` | Upper bound for start workflows (seconds) |
 | `STOP_TIMEOUT` | | `300` | Upper bound for stop workflows (seconds) |
@@ -604,10 +611,64 @@ Guarantees:
 `wait until Minecraft stopped → wait AUTO_SHUTDOWN_DELAY → deallocate`. With the
 default `false`, stopping Minecraft never touches the VM.
 
-`IDLE_SHUTDOWN_ENABLED=true` additionally starts one background task that wakes
-up every `IDLE_CHECK_INTERVAL` seconds (15 minutes by default), makes a single
-API call, and stops a server that has had no players for
-`IDLE_SHUTDOWN_MINUTES`. It respects `AUTO_SHUTDOWN_VM` for the VM.
+### Inactivity auto-shutdown (`/timeout`)
+
+`/timeout minutes:90` arms a switch: once the server has had **nobody online**
+for 90 minutes, the bot runs the ordinary stop workflow — a graceful Crafty
+shutdown that saves the world and waits for the server to confirm it has
+stopped — and only then deallocates the Azure VM.
+
+```
+/timeout minutes:90      arm: stop after 90 idle minutes, then free the VM
+/timeout minutes:90 shutdown_vm:false   stop Minecraft only, leave the VM up
+/timeout minutes:0       cancel
+/timeout                 show the current state
+```
+
+The same switch sits under `/status` as an **Auto-shutdown: ON/OFF** button —
+green when armed. Clicking it while off opens a small dialog asking for the
+delay; clicking it while on cancels.
+
+What counts as inactivity:
+
+* **Zero players online.** Any player at all makes the server active, however
+  static the count is, so the countdown restarts the moment somebody joins and
+  starts again only once the last one leaves.
+* A **stopped** server counts as idle too — it is still keeping the VM billing.
+
+What it does and does not do:
+
+* It **never kills** anything. Firing calls exactly the same
+  `stop_minecraft` workflow as `/server stop`, so a timed shutdown and a manual
+  one are the same shutdown, `AUTO_SHUTDOWN_DELAY` grace period included.
+* A failed check (Crafty briefly unreachable) neither resets nor fires the
+  timer. A shutdown only ever follows a **live** observation of an empty server,
+  so an outage while players are online can never stop the server underneath
+  them.
+* If the VM is already powered off, the timeout retires quietly — there is
+  nothing left to shut down.
+* On a VM hosting **several** Crafty servers, an expired timer stops its own
+  server but leaves the VM up while any other server is still running. If that
+  check cannot be made, the VM is left up: an extra hour of compute is cheaper
+  than an unannounced shutdown.
+* The timeout disarms itself once it fires, so a failed shutdown is not retried
+  on every tick. `/timeout` reports what happened.
+
+Armed timeouts are written to `TIMEOUT_STATE_FILE` (`timeout_state.json` next to
+the bot) so a restart does not silently leave a VM billing overnight. The
+countdown deliberately restarts from zero after a restart: the bot was not
+watching while it was down, so it cannot claim the server stayed empty.
+
+Cost on a Pi Zero W: with nothing armed the watcher makes **no API calls at
+all**. With a timeout armed it makes one call every `TIMEOUT_CHECK_INTERVAL`
+seconds (60 s by default) — and not even that while the Azure VM is off, since
+every Crafty request is skipped in that state.
+
+`IDLE_SHUTDOWN_ENABLED=true` simply pre-arms this same switch for the default
+server at startup, using `IDLE_SHUTDOWN_MINUTES` and `AUTO_SHUTDOWN_VM`. There
+is only ever one countdown per server and one code path that stops anything. A
+timeout restored from disk wins over the configured default, since it is the
+more recent deliberate choice.
 
 ---
 
@@ -807,7 +868,11 @@ structurally unable to touch a real service.
   | `CRAFTY_TOKEN` | `CRAFTY_API_TOKEN` |
   | `GUILD_ID` | `DISCORD_GUILD_ID` |
   | `ENABLE_AUTO_STOP_SERVER` | `IDLE_SHUTDOWN_ENABLED` |
-  | `AUTO_STOP_SLEEP_TIME` | `IDLE_CHECK_INTERVAL` |
+  | `AUTO_STOP_SLEEP_TIME` | `TIMEOUT_CHECK_INTERVAL` (`IDLE_CHECK_INTERVAL` is still read) |
+
+* The standalone idle watcher became the `/timeout` switch. `IDLE_SHUTDOWN_*`
+  now pre-arms that switch instead of running a second loop, so the behaviour is
+  the same but it can be changed from Discord without a restart.
 
 * `USERNAME`/`PASSWORD` login was removed. API keys are scoped, revocable and do
   not require storing an account password; MFA-protected accounts cannot log in
@@ -832,6 +897,9 @@ structurally unable to touch a real service.
 | `/server properties` or `/server roster` says not authorised | The API key lacks `FILES`. |
 | `/server roster` says a list does not exist yet | Minecraft only writes `whitelist.json`, `ops.json` and `banned-players.json` once the list is first used. |
 | `/server history` is empty | Crafty records samples only while a server runs, and keeps about an hour. |
+| `/timeout` never fires | The countdown only runs at zero players. Check `/timeout` — it says whether the countdown is running or paused, and why. |
+| An armed timeout disappeared after a restart | Check that `TIMEOUT_STATE_FILE` is writable by the bot's user; the state is saved next to it and a failed write is logged as a warning. |
+| `/timeout` armed but the VM stayed up | Either another Crafty server on that VM is still running, or the VM check failed — both leave the VM up on purpose. The log line says which. |
 | `/servers` shows fewer servers than expected | `/servers/status` only publishes servers with *Show status* enabled in Crafty. |
 | Everything is slow on the Pi | Normal on first import; check `journalctl -u crafty-bot` and confirm `LOG_LEVEL=INFO`. |
 | Certificate or Azure token errors right after boot | The Pi Zero W has no clock. Check `timedatectl status`; the bot needs the time to be in sync. |

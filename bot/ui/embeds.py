@@ -22,6 +22,7 @@ from bot.services.crafty import (
     Webhook,
 )
 from bot.services.orchestrator import InfraSnapshot, Step, StepState
+from bot.services.timeout import TimeoutState
 from bot.utils import human_bytes, sparkline, uptime_since
 
 NA = "N/A"
@@ -133,11 +134,99 @@ def _resource_lines(stats: ServerStats, host: HostStats | None) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- #
+# Inactivity timeout
+# --------------------------------------------------------------------------- #
+def timeout_line(state: TimeoutState | None) -> str:
+    """One line describing an armed ``/timeout``, for reuse across embeds.
+
+    Discord renders ``<t:unix:R>`` as a live relative time ("in 42 minutes"),
+    so the countdown stays honest without the bot re-editing the message.
+    """
+    if state is None:
+        return "⏱️ Auto-shutdown **off**"
+
+    target = "server + VM" if state.shutdown_vm else "server"
+    if not state.counting:
+        online = state.last_online
+        if online:
+            why = f"paused, {online} player{'s' if online != 1 else ''} online"
+        else:
+            # Armed, but the watcher has not made its first check yet.
+            why = "waiting for the first check"
+        return (
+            f"⏱️ Auto-shutdown **armed** — {state.minutes} min idle → stop {target}\n"
+            f"Countdown {why}"
+        )
+
+    deadline = state.deadline_unix
+    when = f"<t:{int(deadline)}:R>" if deadline is not None else "soon"
+    return (
+        f"⏱️ Auto-shutdown **armed** — {state.minutes} min idle → stop {target}\n"
+        f"Empty now: stopping {when}"
+    )
+
+
+def timeout_embed(
+    state: TimeoutState | None, server_name: str, *, last_result: str = ""
+) -> discord.Embed:
+    """The full ``/timeout`` panel."""
+    if state is None:
+        embed = _base(f"⏱️ Auto-shutdown — {server_name}", COLOR_OFFLINE)
+        embed.description = (
+            "No timeout is armed. `/timeout minutes:90` stops the server "
+            "gracefully once it has been empty for 90 minutes, then frees the "
+            "Azure VM."
+        )
+        if last_result:
+            embed.add_field(name="Last shutdown", value=last_result, inline=False)
+        return embed
+
+    embed = _base(f"⏱️ Auto-shutdown — {server_name}", COLOR_WARNING)
+    embed.description = (
+        f"The server is stopped **gracefully through Crafty** after "
+        f"**{state.minutes} minutes** with nobody online"
+        + (", then the Azure VM is deallocated." if state.shutdown_vm else ".")
+    )
+    if state.counting:
+        deadline = state.deadline_unix
+        embed.add_field(
+            name="Countdown",
+            value=(
+                f"Running — stopping <t:{int(deadline)}:R>"
+                if deadline is not None
+                else "Running"
+            ),
+            inline=True,
+        )
+    else:
+        online = state.last_online
+        embed.add_field(
+            name="Countdown",
+            value=(
+                f"Paused — {online} player(s) online"
+                if online
+                else "Paused — waiting for the first check"
+            ),
+            inline=True,
+        )
+    embed.add_field(
+        name="Also stops the VM", value="Yes" if state.shutdown_vm else "No", inline=True
+    )
+    if state.armed_by:
+        embed.add_field(name="Armed by", value=f"<@{state.armed_by}>", inline=True)
+    if last_result:
+        embed.add_field(name="Last shutdown", value=last_result, inline=False)
+    embed.set_footer(text=f"{FOOTER} • disarm with /timeout minutes:0")
+    return embed
+
+
 def status_embed(
     snapshot: InfraSnapshot,
     host: HostStats | None = None,
     *,
     clock_offset: float = 0.0,
+    timeout: TimeoutState | None = None,
 ) -> discord.Embed:
     """The centrepiece: one embed describing the whole infrastructure."""
     stats = snapshot.stats
@@ -201,6 +290,8 @@ def status_embed(
             names = ", ".join(f"`{player.name}`" for player in stats.players[:10])
             embed.add_field(name="👥 Online now", value=names, inline=False)
 
+    embed.add_field(name="⏱️ Auto-shutdown", value=timeout_line(timeout), inline=False)
+
     if snapshot.server_id:
         embed.set_footer(text=f"{FOOTER} • server {snapshot.server_id[:8]}")
     return embed
@@ -214,6 +305,7 @@ def health_embed(
     azure_state: str,
     minecraft_state: str,
     latency_ms: float | None = None,
+    timeout: TimeoutState | None = None,
 ) -> discord.Embed:
     """Diagnostic view answering "which layer is broken?"."""
 
@@ -236,6 +328,7 @@ def health_embed(
     )
     embed.add_field(name="☁️ Azure", value=azure_state, inline=False)
     embed.add_field(name="🎮 Minecraft", value=minecraft_state, inline=False)
+    embed.add_field(name="⏱️ Auto-shutdown", value=timeout_line(timeout), inline=False)
     return embed
 
 
@@ -247,6 +340,7 @@ def server_embed(
     host: HostStats | None = None,
     *,
     clock_offset: float = 0.0,
+    timeout: TimeoutState | None = None,
 ) -> discord.Embed:
     colour = COLOR_ERROR if stats.crashed else (COLOR_ONLINE if stats.running else COLOR_OFFLINE)
     embed = _base(f"🎮 {stats.name or 'Minecraft server'}", colour, _state_line(stats.state))
@@ -273,10 +367,13 @@ def server_embed(
         embed.add_field(name="MOTD", value=stats.description[:1024], inline=False)
     if host is not None:
         embed.add_field(name="Host resources", value=_resource_lines(stats, host), inline=False)
+    embed.add_field(name="⏱️ Auto-shutdown", value=timeout_line(timeout), inline=False)
     return embed
 
 
-def players_embed(stats: ServerStats) -> discord.Embed:
+def players_embed(
+    stats: ServerStats, timeout: TimeoutState | None = None
+) -> discord.Embed:
     if not stats.running:
         return warning_embed(
             "Server offline", "The Minecraft server is not running, so nobody is online."
@@ -301,6 +398,10 @@ def players_embed(stats: ServerStats) -> discord.Embed:
 
     embed.add_field(name="Server", value=stats.name or NA, inline=True)
     embed.add_field(name="Players", value=_players_value(stats), inline=True)
+    if timeout is not None:
+        # An empty server with a timer running is exactly when people want to
+        # know how long they have to join before it shuts down.
+        embed.add_field(name="⏱️ Auto-shutdown", value=timeout_line(timeout), inline=False)
     return embed
 
 
@@ -383,7 +484,10 @@ def workflow_embed(
 # --------------------------------------------------------------------------- #
 # Multi-server overview
 # --------------------------------------------------------------------------- #
-def servers_overview_embed(lines: Sequence[ServerStatusLine]) -> discord.Embed:
+def servers_overview_embed(
+    lines: Sequence[ServerStatusLine],
+    timeouts: Mapping[str, TimeoutState] | None = None,
+) -> discord.Embed:
     """Every server Crafty publishes, from a single ``GET /servers/status`` call."""
     if not lines:
         return warning_embed(
@@ -397,6 +501,7 @@ def servers_overview_embed(lines: Sequence[ServerStatusLine]) -> discord.Embed:
     colour = COLOR_ONLINE if running else COLOR_OFFLINE
     embed = _base(f"🗂️ Crafty servers — {running}/{len(lines)} up", colour)
 
+    armed = timeouts or {}
     for line in lines[:20]:
         name = line.world_name or line.server_id[:8]
         detail = [_state_line("running" if line.running else "stopped")]
@@ -404,6 +509,14 @@ def servers_overview_embed(lines: Sequence[ServerStatusLine]) -> discord.Embed:
             detail.append(f"👥 {line.online or 0} / {line.max_players or '?'}")
         if line.version:
             detail.append(f"🏷️ {line.version}")
+        state = armed.get(line.server_id)
+        if state is not None:
+            deadline = state.deadline_unix
+            detail.append(
+                f"⏱️ stops <t:{int(deadline)}:R>"
+                if deadline is not None
+                else f"⏱️ {state.minutes} min idle"
+            )
         embed.add_field(name=f"🎮 {name}", value="\n".join(detail), inline=True)
 
     if len(lines) > 20:

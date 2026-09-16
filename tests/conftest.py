@@ -45,6 +45,9 @@ def config(crafty_config: CraftyConfig, azure_config: AzureConfig) -> Config:
         azure=azure_config,
         permissions=PermissionConfig(),
         status_cache_ttl=0.0,
+        # Tests never write a timeout state file unless they pass their own
+        # tmp_path, so the suite leaves nothing behind in the working directory.
+        timeout_state_file="",
         start_timeout=30,
         stop_timeout=30,
     )

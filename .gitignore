@@ -12,3 +12,7 @@ venv/
 /htmlcov/
 .coverage
 coverage.xml
+
+# Armed /timeout state, written next to the bot at runtime.
+timeout_state.json
+timeout_state.json.tmp

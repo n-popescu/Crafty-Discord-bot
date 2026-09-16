@@ -136,9 +136,14 @@ class Config:
     crafty_utc_offset: float | None = None
     auto_shutdown_vm: bool = False
     auto_shutdown_delay: int = 300
+    #: Pre-arm the ``/timeout`` watcher for the default server at startup.
     idle_shutdown_enabled: bool = False
     idle_shutdown_minutes: int = 30
-    idle_check_interval: int = 900
+    #: Seconds between player-count checks while a timeout is armed.
+    timeout_check_interval: int = 60
+    #: Where armed timeouts are remembered across restarts. Empty disables
+    #: persistence, in which case a restart clears every armed timeout.
+    timeout_state_file: str = "timeout_state.json"
     start_timeout: int = 600
     stop_timeout: int = 300
 
@@ -221,7 +226,15 @@ def load_config(*, require_azure: bool = False) -> Config:
         auto_shutdown_delay=_env_int("AUTO_SHUTDOWN_DELAY", 300, minimum=0),
         idle_shutdown_enabled=_env_bool("IDLE_SHUTDOWN_ENABLED", False),
         idle_shutdown_minutes=_env_int("IDLE_SHUTDOWN_MINUTES", 30, minimum=1),
-        idle_check_interval=_env_int("IDLE_CHECK_INTERVAL", 900, minimum=60),
+        # IDLE_CHECK_INTERVAL drove the old standalone idle watcher, which
+        # /timeout replaced. Honour it when the new name is unset so an existing
+        # .env keeps the cadence its author chose.
+        timeout_check_interval=_env_int(
+            "TIMEOUT_CHECK_INTERVAL",
+            _env_int("IDLE_CHECK_INTERVAL", 60, minimum=15),
+            minimum=15,
+        ),
+        timeout_state_file=_env("TIMEOUT_STATE_FILE", "timeout_state.json"),
         start_timeout=_env_int("START_TIMEOUT", 600, minimum=30),
         stop_timeout=_env_int("STOP_TIMEOUT", 300, minimum=30),
     )

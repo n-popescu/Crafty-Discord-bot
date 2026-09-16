@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
@@ -24,6 +24,7 @@ from bot.services.crafty import (
     Webhook,
 )
 from bot.services.orchestrator import InfraSnapshot, Step, StepState
+from bot.services.timeout import TimeoutState
 from bot.ui import embeds
 from bot.utils import human_bytes, human_duration, parse_timestamp, poll_until
 
@@ -444,3 +445,198 @@ def test_uptime_offset_reaches_the_status_embed():
     snapshot = InfraSnapshot(server_id="a", stats=stats)
     embed = embeds.status_embed(snapshot, clock_offset=2)
     assert "1h 0m" in embed.fields[0].value
+
+
+# --------------------------------------------------------------------------- #
+# Inactivity timeout
+# --------------------------------------------------------------------------- #
+def armed(minutes: int = 90, *, empty: bool = False, shutdown_vm: bool = True, online=None):
+    import time
+
+    return TimeoutState(
+        server_id="a",
+        minutes=minutes,
+        shutdown_vm=shutdown_vm,
+        armed_by=7,
+        empty_since=time.monotonic() if empty else None,
+        last_online=online,
+    )
+
+
+def test_timeout_line_says_off_when_nothing_is_armed():
+    assert "off" in embeds.timeout_line(None).lower()
+
+
+def test_timeout_line_shows_a_relative_deadline_while_counting():
+    line = embeds.timeout_line(armed(90, empty=True))
+    assert "armed" in line.lower()
+    # Discord renders <t:unix:R> as a live "in 90 minutes".
+    assert ":R>" in line
+
+
+def test_timeout_line_reports_a_paused_countdown():
+    line = embeds.timeout_line(armed(90, online=3))
+    assert "paused" in line
+    assert "3 players online" in line
+
+
+def test_timeout_line_says_when_nothing_has_been_checked_yet():
+    line = embeds.timeout_line(armed(90))
+    assert "waiting for the first check" in line
+
+
+def test_timeout_line_says_whether_the_vm_is_included():
+    assert "server + VM" in embeds.timeout_line(armed(shutdown_vm=True))
+    assert "server + VM" not in embeds.timeout_line(armed(shutdown_vm=False))
+
+
+def test_timeout_embed_explains_the_feature_when_disarmed():
+    embed = embeds.timeout_embed(None, "Survival")
+    assert "/timeout minutes:90" in embed.description
+
+
+def test_timeout_embed_describes_a_graceful_stop():
+    embed = embeds.timeout_embed(armed(90, empty=True), "Survival")
+    assert "gracefully through Crafty" in embed.description
+    assert "90 minutes" in embed.description
+    assert any("Armed by" == field.name for field in embed.fields)
+
+
+def test_timeout_embed_surfaces_the_last_shutdown():
+    embed = embeds.timeout_embed(None, "Survival", last_result="Stopped after 90 min.")
+    assert any("Last shutdown" == field.name for field in embed.fields)
+
+
+def test_status_embed_always_reports_the_timeout():
+    stats = ServerStats(server_id="a", name="Survival", running=True)
+    snapshot = InfraSnapshot(server_id="a", stats=stats)
+
+    off = embeds.status_embed(snapshot)
+    assert any("Auto-shutdown" in field.name for field in off.fields)
+    assert "off" in next(f.value for f in off.fields if "Auto-shutdown" in f.name).lower()
+
+    on = embeds.status_embed(snapshot, timeout=armed(90, empty=True))
+    assert "armed" in next(f.value for f in on.fields if "Auto-shutdown" in f.name).lower()
+
+
+def test_server_embed_reports_the_timeout():
+    stats = ServerStats(server_id="a", name="Survival", running=True)
+    embed = embeds.server_embed(stats, timeout=armed(45, empty=True))
+    value = next(f.value for f in embed.fields if "Auto-shutdown" in f.name)
+    assert "45 min idle" in value
+
+
+def test_health_embed_reports_the_timeout():
+    embed = embeds.health_embed(
+        discord_ok=True,
+        crafty_reachable=True,
+        crafty_authenticated=True,
+        azure_state="🟢 running",
+        minecraft_state="🟢 running",
+        timeout=armed(30, empty=True),
+    )
+    assert any("Auto-shutdown" in field.name for field in embed.fields)
+
+
+def test_players_embed_shows_the_countdown_when_the_server_just_emptied():
+    stats = ServerStats(server_id="a", name="Survival", running=True, online=0)
+    embed = embeds.players_embed(stats, armed(20, empty=True))
+    assert any("Auto-shutdown" in field.name for field in embed.fields)
+
+
+def test_players_embed_omits_the_field_when_nothing_is_armed():
+    stats = ServerStats(server_id="a", name="Survival", running=True, online=0)
+    embed = embeds.players_embed(stats, None)
+    assert not any("Auto-shutdown" in field.name for field in embed.fields)
+
+
+def test_servers_overview_marks_servers_with_a_timer():
+    lines = [
+        ServerStatusLine(server_id="a", world_name="Survival", running=True, online=0),
+        ServerStatusLine(server_id="b", world_name="Creative", running=True, online=0),
+    ]
+    embed = embeds.servers_overview_embed(lines, {"a": armed(90, empty=True)})
+    values = {field.name: field.value for field in embed.fields}
+    assert "⏱️" in values["🎮 Survival"]
+    assert "⏱️" not in values["🎮 Creative"]
+
+
+# --------------------------------------------------------------------------- #
+# The switch
+# --------------------------------------------------------------------------- #
+def _status_view(*, armed_state: bool, may_control: bool = True, toggle=True):
+    from bot.ui.views import StatusView
+
+    async def noop(_interaction):
+        return None
+
+    return StatusView(
+        checker=PermissionChecker(PermissionConfig()),
+        owner_id=1,
+        refresh=noop,
+        start=noop,
+        stop=noop,
+        restart=noop,
+        running=True,
+        may_control=may_control,
+        timeout_armed=armed_state,
+        toggle_timeout=noop if toggle else None,
+    )
+
+
+def test_the_switch_reads_on_when_a_timeout_is_armed():
+    view = _status_view(armed_state=True)
+    button = next(c for c in view.children if "Auto-shutdown" in (c.label or ""))
+    assert button.label == "Auto-shutdown: ON"
+    assert button.style is discord.ButtonStyle.success
+
+
+def test_the_switch_reads_off_when_nothing_is_armed():
+    view = _status_view(armed_state=False)
+    button = next(c for c in view.children if "Auto-shutdown" in (c.label or ""))
+    assert button.label == "Auto-shutdown: OFF"
+    assert button.style is discord.ButtonStyle.secondary
+
+
+def test_the_switch_is_hidden_from_users_who_may_not_control_the_server():
+    view = _status_view(armed_state=True, may_control=False)
+    assert not any("Auto-shutdown" in (c.label or "") for c in view.children)
+
+
+def test_the_switch_is_hidden_when_no_server_could_be_resolved():
+    view = _status_view(armed_state=False, toggle=False)
+    assert not any("Auto-shutdown" in (c.label or "") for c in view.children)
+
+
+async def test_the_modal_rejects_a_delay_that_is_not_a_number():
+    from bot.ui.views import TimeoutModal
+
+    submitted = []
+
+    async def on_submit(_interaction, minutes):
+        submitted.append(minutes)
+
+    modal = TimeoutModal(on_submit=on_submit, max_minutes=1440)
+    interaction = MagicMock()
+    interaction.response.send_message = AsyncMock()
+
+    for bad in ("abc", "0", "99999", ""):
+        modal.minutes._value = bad
+        await modal.on_submit(interaction)
+    assert submitted == []
+    assert interaction.response.send_message.await_count == 4
+
+
+async def test_the_modal_passes_a_valid_delay_through():
+    from bot.ui.views import TimeoutModal
+
+    submitted = []
+
+    async def on_submit(_interaction, minutes):
+        submitted.append(minutes)
+
+    modal = TimeoutModal(on_submit=on_submit, max_minutes=1440, default=30)
+    assert modal.minutes.default == "30"
+    modal.minutes._value = " 90 "
+    await modal.on_submit(MagicMock())
+    assert submitted == [90]
