@@ -196,3 +196,27 @@ async def test_arming_with_nothing_to_go_on_asks_which_server(tiered_config):
     )
     assert run.state is None
     assert "Which server?" in run.embed.title
+
+
+# --------------------------------------------------------------------------- #
+# Arming or disarming through the offline fallback must say so, not just
+# reading the state -- an unverified id has a lasting effect on those two.
+# --------------------------------------------------------------------------- #
+async def test_arming_while_offline_warns_the_identity_is_unverified(offline_config):
+    run = await invoke(
+        offline_config, member(3, (SERVER_ROLE, AZURE_ROLE)), minutes=90, vm_off=True
+    )
+    assert run.state is not None
+    assert any("not verified" in field.value for field in run.embed.fields)
+
+
+async def test_disarming_while_offline_warns_the_identity_is_unverified(offline_config):
+    user = member(3, (SERVER_ROLE, AZURE_ROLE))
+    run = await invoke(offline_config, user, minutes=0, vm_off=True, prearm="srv-1")
+    assert any("not verified" in field.value for field in run.embed.fields)
+
+
+async def test_arming_while_online_never_shows_the_unverified_warning(tiered_config):
+    """The note is specifically about the offline fallback, not a blanket disclaimer."""
+    run = await invoke(tiered_config, member(3, (SERVER_ROLE, AZURE_ROLE)), minutes=90)
+    assert not any("not verified" in field.value for field in run.embed.fields)

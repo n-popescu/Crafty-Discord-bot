@@ -181,6 +181,11 @@ class TimeoutModal(discord.ui.Modal):
         self._on_submit = on_submit
         self._max_minutes = max_minutes
         self.minutes.default = str(default)
+        # The declared max_length is a fallback for MAX_MINUTES' current digit
+        # count; deriving it here means a wider bound stays enterable even if
+        # that constant ever grows past four digits, instead of silently
+        # capping the text field below its own maximum.
+        self.minutes.max_length = max(len(str(max_minutes)), self.minutes.max_length)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         raw = str(self.minutes.value).strip()

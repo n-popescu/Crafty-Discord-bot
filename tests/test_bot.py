@@ -269,3 +269,56 @@ async def test_an_unresolvable_server_does_not_break_startup(config):
         assert bot.timeouts.active() == ()
     finally:
         await _close(bot)
+
+
+async def test_a_configured_server_id_pre_arms_without_needing_live_crafty(config):
+    """The bug this guards against.
+
+    resolve_server_id() always validates against a live server list, even
+    when a candidate is already given -- so it fails whenever Crafty is
+    unreachable, which is routinely true at startup: the whole point of
+    IDLE_SHUTDOWN_ENABLED is a VM that rests powered off between sessions.
+    With CRAFTY_SERVER_ID set there is nothing to resolve, so pre-arming
+    must not depend on Crafty answering at all.
+    """
+    from dataclasses import replace
+
+    from bot.errors import CraftyHostOffline
+
+    instance = CraftyBot(
+        replace(
+            config,
+            idle_shutdown_enabled=True,
+            idle_shutdown_minutes=45,
+            crafty=replace(config.crafty, default_server_id="configured-server"),
+        )
+    )
+
+    async def unreachable(_requested=None):
+        raise CraftyHostOffline()
+
+    instance.crafty.resolve_server_id = unreachable
+    try:
+        await instance._prearm_idle_timeout()
+        state = instance.timeouts.get("configured-server")
+        assert state is not None
+        assert state.minutes == 45
+    finally:
+        await _close(instance)
+
+
+async def test_pre_arming_without_a_configured_id_still_needs_a_live_lookup(config):
+    """Auto-detecting the single server has no id to arm without asking Crafty."""
+    from bot.errors import CraftyHostOffline
+
+    bot = await _bot_with_server(config, idle_shutdown_enabled=True)
+
+    async def unreachable(_requested=None):
+        raise CraftyHostOffline()
+
+    bot.crafty.resolve_server_id = unreachable
+    try:
+        await bot._prearm_idle_timeout()
+        assert bot.timeouts.active() == ()
+    finally:
+        await _close(bot)

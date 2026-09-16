@@ -6,6 +6,7 @@ so a 90-minute countdown is exercised without waiting 90 minutes.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -757,3 +758,65 @@ async def test_a_powered_off_vm_is_a_definite_answer_not_a_stall(service, crafty
     assert state.stalled is False
     assert state.last_running is False
     assert state.counting is False
+
+
+# --------------------------------------------------------------------------- #
+# One server firing must not block the check of any other armed server
+# --------------------------------------------------------------------------- #
+async def test_firing_one_server_does_not_block_checking_another(config, crafty):
+    """The bug this guards against.
+
+    Firing blocks for the graceful stop plus AUTO_SHUTDOWN_DELAY (five minutes
+    by default) before the VM is deallocated. A tick that checked servers one
+    at a time would let that block every other armed server's check for the
+    whole time -- long enough to miss their real deadline and, worse, trip the
+    blind-spot guard on them the moment the loop got back around. Servers are
+    checked concurrently precisely to prevent that.
+
+    This test intentionally does not use the `clock` fixture: it needs real
+    asyncio scheduling (an Event a second coroutine can wait on), which a
+    frozen `time.monotonic` would break.
+    """
+    crafty.servers = (
+        ServerSummary(server_id=SERVER_ID, name="A"),
+        ServerSummary(server_id=OTHER_ID, name="B"),
+    )
+    crafty.other_running = True
+
+    release = asyncio.Event()
+
+    class BlockingOrchestrator(FakeOrchestrator):
+        async def stop_minecraft(self, server_id, *, shutdown_vm=False, delay=None, **_):
+            await release.wait()
+            self.stops.append((server_id, shutdown_vm, delay))
+
+    orchestrator = BlockingOrchestrator()
+    service = IdleTimeoutService(config, crafty, orchestrator, state_path="")
+
+    service.arm(SERVER_ID, 1, shutdown_vm=True, armed_by=1)
+    service.arm(OTHER_ID, 1, shutdown_vm=False, armed_by=1)
+
+    import time as real_time
+
+    now = real_time.monotonic()  # this test uses the real clock, not `clock`
+    a = service.get(SERVER_ID)
+    a.counting, a.idle_seconds, a.last_checked = True, 61.0, now
+    b = service.get(OTHER_ID)
+    b.counting, b.idle_seconds, b.last_checked = True, 30.0, now
+
+    tick = asyncio.create_task(service._tick())
+    # Let both _check_one coroutines run until A blocks inside the fake stop
+    # workflow; B has nothing to block on, so its own observation completes.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert not tick.done()  # still blocked on A's release
+    assert service.get(OTHER_ID).idle_seconds > 30.0
+    assert orchestrator.stops == []
+
+    release.set()
+    await tick
+    # Server B is still running, so the existing cross-server guard correctly
+    # declines to deallocate the VM out from under it -- shutdown_vm is False
+    # even though this timeout was armed with shutdown_vm=True.
+    assert orchestrator.stops == [(SERVER_ID, False, 0)]

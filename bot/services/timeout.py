@@ -308,38 +308,59 @@ class IdleTimeoutService:
     # The check itself
     # ------------------------------------------------------------------ #
     async def _tick(self) -> None:
-        """Update every armed countdown and fire the ones that have expired."""
-        for server_id in list(self._states):
-            state = self._states.get(server_id)
-            if state is None:
-                continue
-            try:
-                await self._observe(state)
-            except CraftyHostOffline:
-                # The VM is off, so the server is off: a definite answer, not a
-                # blind spot. The timeout stays armed for the next time the
-                # server comes up.
-                if state.counting:
-                    logger.debug(
-                        "Idle timeout for server %s paused: the VM is off", server_id
-                    )
-                state.pause()
-                state.stalled = False
-                state.last_running = False
-                state.last_checked = None
-            except BotError as exc:
-                # Crafty could not be reached or could not answer -- most often
-                # a VM that is up while Crafty itself is not. We learned
-                # nothing, so the countdown freezes where it is rather than
-                # advancing on time nobody watched.
-                state.stalled = True
-                state.failures += 1
+        """Update every armed countdown and fire the ones that have expired.
+
+        Each server is checked as its own task, run concurrently. Firing a
+        timeout blocks for as long as the graceful stop takes plus
+        ``AUTO_SHUTDOWN_DELAY`` (five minutes by default) before the VM is
+        deallocated, and a sequential loop would let that one shutdown stall
+        every other armed server's check for the whole time -- long enough to
+        both miss their real deadline and trip the blind-spot guard on them
+        the moment the loop finally got back around.
+        """
+        await asyncio.gather(
+            *(self._check_one(server_id) for server_id in list(self._states))
+        )
+
+    async def _check_one(self, server_id: str) -> None:
+        """Observe and, if due, fire one server's timeout.
+
+        Failures are caught here rather than left to propagate to
+        :meth:`_tick`'s caller, so that one server behaving unexpectedly can
+        never prevent the others in the same tick from being checked.
+        """
+        state = self._states.get(server_id)
+        if state is None:
+            return
+        try:
+            await self._observe(state)
+        except CraftyHostOffline:
+            # The VM is off, so the server is off: a definite answer, not a
+            # blind spot. The timeout stays armed for the next time the
+            # server comes up.
+            if state.counting:
                 logger.debug(
-                    "Idle timeout check failed for server %s (%d in a row): %s",
-                    server_id,
-                    state.failures,
-                    exc.user_message,
+                    "Idle timeout for server %s paused: the VM is off", server_id
                 )
+            state.pause()
+            state.stalled = False
+            state.last_running = False
+            state.last_checked = None
+        except BotError as exc:
+            # Crafty could not be reached or could not answer -- most often
+            # a VM that is up while Crafty itself is not. We learned
+            # nothing, so the countdown freezes where it is rather than
+            # advancing on time nobody watched.
+            state.stalled = True
+            state.failures += 1
+            logger.debug(
+                "Idle timeout check failed for server %s (%d in a row): %s",
+                server_id,
+                state.failures,
+                exc.user_message,
+            )
+        except Exception:  # noqa: BLE001 - one server's bug must not sink the rest
+            logger.exception("Idle timeout check crashed for server %s", server_id)
 
     async def _observe(self, state: TimeoutState) -> None:
         stats = await self._crafty.get_stats(

@@ -104,14 +104,31 @@ class CraftyBot(commands.Bot):
             # A timeout restored from disk is a deliberate, more recent choice
             # than the configured default.
             return
-        try:
-            server_id = await self.crafty.resolve_server_id(None)
-        except BotError as exc:
-            logger.warning(
-                "IDLE_SHUTDOWN_ENABLED is set but no server could be resolved: %s",
-                exc.user_message,
-            )
-            return
+
+        # CraftyService.resolve_server_id() always validates against a live
+        # list_servers() call, even when a candidate id is already given --
+        # so it fails whenever Crafty is unreachable, which is routinely true
+        # at startup: the whole point of IDLE_SHUTDOWN_ENABLED is a VM that
+        # rests powered off between sessions. When CRAFTY_SERVER_ID is set,
+        # there is nothing to resolve, so it is armed directly; the watcher
+        # itself will report a problem the first time it can reach Crafty if
+        # the id turns out to be wrong. Auto-detecting the single server (no
+        # configured id) still needs a live server list.
+        configured = self.config.crafty.default_server_id
+        if configured:
+            server_id = configured
+        else:
+            try:
+                server_id = await self.crafty.resolve_server_id(None)
+            except BotError as exc:
+                logger.warning(
+                    "IDLE_SHUTDOWN_ENABLED is set but no server could be resolved "
+                    "(%s); set CRAFTY_SERVER_ID so it can be armed even while the "
+                    "VM is off, or arm it by hand with /timeout once it is up",
+                    exc.user_message,
+                )
+                return
+
         self.timeouts.arm(
             server_id,
             self.config.idle_shutdown_minutes,

@@ -79,17 +79,17 @@ bot/
 ├── config.py          environment parsing and validation
 ├── permissions.py     three configurable permission tiers
 ├── cache.py           tiny TTL cache with single-flight requests
-├── tasks.py           optional idle watcher (disabled by default)
 ├── errors.py          typed, user-safe exceptions
 ├── utils.py           logging (with secret scrubbing), formatting, backoff
 ├── services/
 │   ├── crafty.py      Crafty Controller v2 API client
 │   ├── azure.py       Azure ARM client + credential provider
-│   └── orchestrator.py Azure ↔ Crafty workflows
+│   ├── orchestrator.py Azure ↔ Crafty workflows
+│   └── timeout.py     /timeout inactivity watcher (armed on demand)
 ├── ui/
 │   ├── embeds.py      reusable embed builders
-│   └── views.py       buttons, confirmations, select menus
-└── cogs/              status, server, azure, minecraft, schedule
+│   └── views.py       buttons, confirmations, select menus, the timeout modal
+└── cogs/              status, server, azure, minecraft, schedule, webhooks, timeout
 
 deploy/
 ├── crafty-bot.service systemd unit
@@ -689,7 +689,12 @@ changes, so there is nothing to watch closely.
 server at startup, using `IDLE_SHUTDOWN_MINUTES` and `AUTO_SHUTDOWN_VM`. There
 is only ever one countdown per server and one code path that stops anything. A
 timeout restored from disk wins over the configured default, since it is the
-more recent deliberate choice.
+more recent deliberate choice. Pre-arming needs `CRAFTY_SERVER_ID` set: with it,
+arming does not depend on Crafty answering at all, so it works even though the
+whole point of this setting is a VM that normally rests powered off between
+sessions; without it, the bot has to ask Crafty which server to arm, which it
+cannot do while that same VM is down -- in that case, arm it by hand with
+`/timeout` once the server is up instead.
 
 ---
 

@@ -658,3 +658,18 @@ async def test_the_modal_passes_a_valid_delay_through():
     modal.minutes._value = " 90 "
     await modal.on_submit(MagicMock())
     assert submitted == [90]
+
+
+def test_the_modal_field_can_always_fit_its_own_maximum():
+    """A future MAX_MINUTES with more digits must not silently become uninputtable."""
+    from bot.ui.views import TimeoutModal
+
+    modal = TimeoutModal(on_submit=None, max_minutes=123456)
+    assert modal.minutes.max_length >= len(str(123456))
+
+
+def test_the_modal_field_keeps_its_declared_minimum_for_small_bounds():
+    from bot.ui.views import TimeoutModal
+
+    modal = TimeoutModal(on_submit=None, max_minutes=99)
+    assert modal.minutes.max_length >= 4  # still fits "1440"-sized defaults

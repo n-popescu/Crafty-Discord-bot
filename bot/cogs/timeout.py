@@ -26,6 +26,16 @@ from bot.ui import embeds
 logger = logging.getLogger(__name__)
 
 
+#: Shown wherever a server identity came from the offline fallback rather
+#: than a live Crafty lookup, so a mistyped name does not silently create a
+#: timeout keyed on a string Crafty will never recognise.
+_UNVERIFIED_NOTE = (
+    "Crafty could not be contacted, so this server identity was not verified "
+    "against it -- double-check it is the exact server ID, not its display "
+    "name, or this may not match any real server once Crafty is back."
+)
+
+
 class TimeoutCog(ServiceCog):
     """One command that arms, disarms and reports the inactivity timeout."""
 
@@ -83,6 +93,8 @@ class TimeoutCog(ServiceCog):
                     "Nothing to cancel", f"No timeout was armed for **{name}**."
                 )
             )
+            if not live:
+                embed.add_field(name="Note", value=_UNVERIFIED_NOTE, inline=False)
             await interaction.edit_original_response(embed=embed, view=None)
             return
 
@@ -132,6 +144,8 @@ class TimeoutCog(ServiceCog):
 
         embed = embeds.success_embed(f"Auto-shutdown armed — {minutes} min", detail)
         embed.add_field(name="Current state", value=embeds.timeout_line(state), inline=False)
+        if not live:
+            embed.add_field(name="Note", value=_UNVERIFIED_NOTE, inline=False)
         await interaction.edit_original_response(embed=embed, view=None)
 
     async def _resolve_tolerant(self, server: str | None) -> tuple[str | None, bool]:
