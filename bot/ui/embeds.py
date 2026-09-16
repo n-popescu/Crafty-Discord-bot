@@ -147,6 +147,12 @@ def timeout_line(state: TimeoutState | None) -> str:
         return "⏱️ Auto-shutdown **off**"
 
     target = "server + VM" if state.shutdown_vm else "server"
+    if state.counting and state.stalled:
+        held = int(state.idle_seconds // 60)
+        return (
+            f"⏱️ Auto-shutdown **armed** — {state.minutes} min idle → stop {target}\n"
+            f"Countdown frozen at {held} min — Crafty is not responding"
+        )
     if not state.counting:
         return (
             f"⏱️ Auto-shutdown **armed** — {state.minutes} min idle → stop {target}\n"
@@ -175,6 +181,9 @@ def armed_timeouts_embed(states: Sequence[TimeoutState]) -> discord.Embed:
 
 def _paused_reason(state: TimeoutState) -> str:
     """Why an armed countdown is not currently running."""
+    if state.stalled:
+        # The VM may well be up; it is Crafty that is not answering.
+        return "frozen, Crafty is not responding"
     if state.last_running is None:
         # Armed, but the watcher has not made its first check yet.
         return "waiting for the first check"
@@ -206,8 +215,17 @@ def timeout_embed(
         f"**{state.minutes} minutes** with nobody online"
         + (", then the Azure VM is deallocated." if state.shutdown_vm else ".")
     )
-    if state.counting:
-        deadline = state.deadline_unix
+    deadline = state.deadline_unix
+    if state.counting and state.stalled:
+        embed.add_field(
+            name="Countdown",
+            value=(
+                f"Frozen at {int(state.idle_seconds // 60)} of {state.minutes} min "
+                "— Crafty is not responding"
+            ),
+            inline=True,
+        )
+    elif state.counting:
         embed.add_field(
             name="Countdown",
             value=(

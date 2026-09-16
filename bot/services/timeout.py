@@ -50,6 +50,11 @@ IDLE_SLEEP = 300.0
 #: down a server that filled and emptied a minute ago.
 OBSERVATION_GRACE = 3.0
 
+#: Consecutive failed checks after which the watcher slows down. A Crafty that
+#: is not answering usually is not about to, and each attempt costs retries and
+#: a connection timeout on a Pi Zero W.
+STALL_BACKOFF_AFTER = 3
+
 #: Sleep between checks while every armed server is known to be stopped. The
 #: countdown cannot start until one comes back up, so polling at full rate would
 #: just burn Azure and Crafty calls; noticing a restart a few minutes late only
@@ -69,38 +74,36 @@ class TimeoutState:
     shutdown_vm: bool
     armed_by: int = 0
     armed_at: float = 0.0
-    #: Monotonic timestamp of when the server was first seen empty. ``None``
-    #: means somebody is online (or nothing has been observed yet), which is
-    #: exactly the state in which no countdown is running.
-    empty_since: float | None = None
+    #: Idle time accumulated from **confirmed observations only**. Deriving it
+    #: from the wall clock instead would keep the countdown running through any
+    #: period the watcher could not see -- a stopped Crafty, a dropped network,
+    #: a VM that is up but has nothing listening -- and shut the server down on
+    #: time that was assumed rather than measured.
+    idle_seconds: float = 0.0
+    #: Whether the last successful check found the server up and empty.
+    counting: bool = False
+    #: Set when the most recent check could not reach Crafty at all. The
+    #: countdown is frozen, not running, until contact is restored.
+    stalled: bool = False
     #: Player count at the last check, for display.
     last_online: int | None = None
     #: Whether the server was running at the last check. ``None`` means the
     #: watcher has not looked yet.
     last_running: bool | None = None
-    #: Monotonic timestamp of the last *successful* observation, used to tell
-    #: whether the accrued idle time was actually watched or merely assumed.
+    #: Monotonic timestamp of the last *successful* observation, used both to
+    #: measure the interval to add and to detect a blind spot.
     last_checked: float | None = None
+    #: Consecutive failed checks, used to back off a hopeless poll.
+    failures: int = 0
 
     @property
     def limit_seconds(self) -> float:
         return self.minutes * 60.0
 
     @property
-    def counting(self) -> bool:
-        """``True`` while the countdown is actually running."""
-        return self.empty_since is not None
-
-    @property
-    def idle_seconds(self) -> float:
-        if self.empty_since is None:
-            return 0.0
-        return max(0.0, time.monotonic() - self.empty_since)
-
-    @property
     def remaining_seconds(self) -> float | None:
-        """Seconds left, or ``None`` while the server is active."""
-        if self.empty_since is None:
+        """Seconds left, or ``None`` while the countdown is not running."""
+        if not self.counting:
             return None
         return max(0.0, self.limit_seconds - self.idle_seconds)
 
@@ -112,7 +115,12 @@ class TimeoutState:
 
     @property
     def expired(self) -> bool:
-        return self.counting and self.remaining_seconds == 0.0
+        return self.counting and self.idle_seconds >= self.limit_seconds
+
+    def pause(self) -> None:
+        """Stop the countdown and forget the partial total."""
+        self.counting = False
+        self.idle_seconds = 0.0
 
     def to_json(self) -> dict[str, Any]:
         """Only the arming decision is persisted -- never the live countdown."""
@@ -259,30 +267,40 @@ class IdleTimeoutService:
 
             await self._sleep_until_next_check()
 
-    async def _sleep_until_next_check(self) -> None:
-        """Sleep until the next check is due, or until something is armed.
+    def _next_delay(self) -> float:
+        """How long to wait before the next round of checks.
 
-        With nothing armed this costs no API calls at all; with a timer running
-        it never overshoots the deadline by more than one check interval.
+        Kept separate from the sleep itself so it can be reasoned about -- and
+        tested -- without anybody actually waiting.
         """
-        delay = IDLE_SLEEP
-        if self._states:
-            interval = float(self._config.timeout_check_interval)
-            # `last_running is None` means "not checked yet", which must not be
-            # mistaken for "stopped" -- a freshly armed timeout gets a prompt
-            # first check.
-            if all(state.last_running is False for state in self._states.values()):
-                interval = max(interval, DORMANT_SLEEP)
-            remaining = [
-                state.remaining_seconds
-                for state in self._states.values()
-                if state.remaining_seconds is not None
-            ]
-            delay = min([interval] + [max(r, 1.0) for r in remaining])
+        if not self._states:
+            return IDLE_SLEEP
 
+        interval = float(self._config.timeout_check_interval)
+        # `last_running is None` means "not checked yet", which must not be
+        # mistaken for "stopped" -- a freshly armed timeout gets a prompt
+        # first check.
+        dormant = all(state.last_running is False for state in self._states.values())
+        # A Crafty that has refused several checks in a row is not worth
+        # hammering; nothing can be counted until it answers again anyway.
+        stalled = all(
+            state.failures >= STALL_BACKOFF_AFTER for state in self._states.values()
+        )
+        if dormant or stalled:
+            interval = max(interval, DORMANT_SLEEP)
+
+        remaining = [
+            state.remaining_seconds
+            for state in self._states.values()
+            if state.remaining_seconds is not None
+        ]
+        return min([interval] + [max(value, 1.0) for value in remaining])
+
+    async def _sleep_until_next_check(self) -> None:
+        """Sleep until the next check is due, or until something is armed."""
         self._wake.clear()
         try:
-            await asyncio.wait_for(self._wake.wait(), timeout=delay)
+            await asyncio.wait_for(self._wake.wait(), timeout=self._next_delay())
         except asyncio.TimeoutError:
             pass
 
@@ -298,21 +316,28 @@ class IdleTimeoutService:
             try:
                 await self._observe(state)
             except CraftyHostOffline:
-                # The VM is off, so the server is off: the countdown does not
-                # run. The timeout stays armed, ready for the next time the
+                # The VM is off, so the server is off: a definite answer, not a
+                # blind spot. The timeout stays armed for the next time the
                 # server comes up.
                 if state.counting:
                     logger.debug(
                         "Idle timeout for server %s paused: the VM is off", server_id
                     )
-                state.empty_since = None
+                state.pause()
+                state.stalled = False
                 state.last_running = False
+                state.last_checked = None
             except BotError as exc:
-                # A transient Crafty failure must not advance *or* reset the
-                # countdown: we simply do not know what the player count is.
+                # Crafty could not be reached or could not answer -- most often
+                # a VM that is up while Crafty itself is not. We learned
+                # nothing, so the countdown freezes where it is rather than
+                # advancing on time nobody watched.
+                state.stalled = True
+                state.failures += 1
                 logger.debug(
-                    "Idle timeout check skipped for server %s: %s",
+                    "Idle timeout check failed for server %s (%d in a row): %s",
                     server_id,
+                    state.failures,
                     exc.user_message,
                 )
 
@@ -322,12 +347,14 @@ class IdleTimeoutService:
         )
         now = time.monotonic()
         online = stats.online or 0
-        # Only a successful observation updates these; a failed check must not
+        # Only a successful observation updates these; a failed check must never
         # be mistaken for having seen the server.
         gap = None if state.last_checked is None else now - state.last_checked
         state.last_checked = now
         state.last_online = online
         state.last_running = stats.running
+        state.stalled = False
+        state.failures = 0
 
         # The countdown measures an idle *running* server. A stopped one is not
         # idle, it is already stopped, so the timer neither runs nor fires --
@@ -341,27 +368,30 @@ class IdleTimeoutService:
                     state.server_id,
                     f"{online} player(s) online" if stats.running else "server stopped",
                 )
-            state.empty_since = None
+            state.pause()
             return
 
-        # The server is empty *now*. If we lost sight of it for longer than a
-        # few check intervals, start counting again from this observation
-        # instead of trusting a total that accrued while we were blind: the
-        # server may have been busy for most of it and emptied moments ago.
-        if state.counting and gap is not None and gap > self._observation_gap:
+        # The server is up and empty *now*. Start a fresh count if it was not
+        # already running, or if we lost sight of the server for longer than a
+        # few check intervals: across a blind spot it may have been busy and
+        # emptied moments ago, so the time in between was never idle at all.
+        if not state.counting:
+            state.counting = True
+            state.idle_seconds = 0.0
+            return
+        if gap is None or gap > self._observation_gap:
             logger.info(
                 "Idle timeout for server %s restarted: no reading for %.0fs, so the "
-                "%.0fs of idle time already counted cannot be trusted",
+                "%.0fs already counted cannot be trusted",
                 state.server_id,
-                gap,
+                gap or 0.0,
                 state.idle_seconds,
             )
-            state.empty_since = None
-
-        if state.empty_since is None:
-            state.empty_since = now
+            state.idle_seconds = 0.0
             return
 
+        # Only the interval we actually watched is added.
+        state.idle_seconds += gap
         if state.expired:
             await self._fire(state)
 
@@ -378,7 +408,7 @@ class IdleTimeoutService:
         reset, which is also what stops a failed shutdown from re-firing on the
         very next tick -- it has to go through the full idle period again.
         """
-        state.empty_since = None
+        state.pause()
 
         shutdown_vm = state.shutdown_vm and self._orchestrator.azure_enabled
         if shutdown_vm and await self._other_servers_running(state.server_id):

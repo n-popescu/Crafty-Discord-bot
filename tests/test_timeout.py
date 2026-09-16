@@ -372,23 +372,23 @@ async def test_vm_shutdown_is_skipped_when_azure_is_disabled(config, crafty, clo
 # --------------------------------------------------------------------------- #
 # Failure handling
 # --------------------------------------------------------------------------- #
-async def test_a_transient_crafty_failure_leaves_the_countdown_alone(
+async def test_a_transient_crafty_failure_freezes_the_countdown(
     service, crafty, clock, orchestrator
 ):
-    """A failed check must neither reset the timer nor fire it."""
+    """A failed check must neither advance the timer nor fire it."""
     service.arm(SERVER_ID, 30, shutdown_vm=False)
     await service._tick()
-    anchor = service.get(SERVER_ID).empty_since
+    await elapse(service, clock, 10 * 60)
+    counted = service.get(SERVER_ID).idle_seconds
 
     crafty.error = CraftyUnavailable()
-    clock.advance(60 * 60)
-    await service._tick()
+    await elapse(service, clock, 60 * 60)
 
     state = service.get(SERVER_ID)
     assert state is not None
-    # Still armed, anchored where it was, and nothing was stopped on a tick
-    # that learned nothing.
-    assert state.empty_since == anchor
+    # Still armed, frozen at what was actually observed, nothing stopped.
+    assert state.idle_seconds == counted
+    assert state.stalled is True
     assert orchestrator.stops == []
 
 
@@ -468,17 +468,19 @@ def test_an_armed_timeout_survives_a_restart(config, crafty, orchestrator, tmp_p
 
 
 def test_a_restored_countdown_starts_again_from_zero(
-    config, crafty, orchestrator, tmp_path, clock
+    config, crafty, orchestrator, tmp_path
 ):
     """The bot was not watching while it was down, so it cannot claim idleness."""
     path = tmp_path / "state.json"
     first = IdleTimeoutService(config, crafty, orchestrator, state_path=path)
     first.arm(SERVER_ID, 45, shutdown_vm=True)
-    first.get(SERVER_ID).empty_since = clock.now
+    first.get(SERVER_ID).counting = True
+    first.get(SERVER_ID).idle_seconds = 30 * 60
 
     second = IdleTimeoutService(config, crafty, orchestrator, state_path=path)
     second._restore()
     assert second.get(SERVER_ID).counting is False
+    assert second.get(SERVER_ID).idle_seconds == 0.0
 
 
 def test_disarming_is_persisted(config, crafty, orchestrator, tmp_path):
@@ -546,23 +548,40 @@ def test_persistence_can_be_switched_off(config, crafty, orchestrator):
 # --------------------------------------------------------------------------- #
 # Derived values used by the embeds
 # --------------------------------------------------------------------------- #
-def test_remaining_is_unknown_while_the_server_is_active(clock):
+def test_remaining_is_unknown_while_the_server_is_active():
     state = TimeoutState(server_id=SERVER_ID, minutes=30, shutdown_vm=True)
     assert state.remaining_seconds is None
     assert state.deadline_unix is None
     assert state.expired is False
 
 
-def test_remaining_counts_down(clock):
+def test_remaining_counts_down_with_observed_time():
     state = TimeoutState(
-        server_id=SERVER_ID, minutes=30, shutdown_vm=True, empty_since=clock.now
+        server_id=SERVER_ID, minutes=30, shutdown_vm=True, counting=True
     )
-    clock.advance(10 * 60)
+    assert state.remaining_seconds == pytest.approx(30 * 60)
+
+    state.idle_seconds = 10 * 60
     assert state.remaining_seconds == pytest.approx(20 * 60)
     assert state.expired is False
-    clock.advance(21 * 60)
+
+    state.idle_seconds = 31 * 60
     assert state.remaining_seconds == 0.0
     assert state.expired is True
+
+
+def test_pausing_forgets_the_partial_total():
+    state = TimeoutState(
+        server_id=SERVER_ID,
+        minutes=30,
+        shutdown_vm=True,
+        counting=True,
+        idle_seconds=25 * 60,
+    )
+    state.pause()
+    assert state.counting is False
+    assert state.idle_seconds == 0.0
+    assert state.remaining_seconds is None
 
 
 # --------------------------------------------------------------------------- #
@@ -645,3 +664,96 @@ async def test_the_grace_scales_with_the_check_interval(config, crafty, orchestr
         replace(config, timeout_check_interval=15), crafty, orchestrator, state_path=""
     )
     assert fast._observation_gap == 180.0
+
+
+# --------------------------------------------------------------------------- #
+# A VM that is up without a working Crafty must not advance the countdown
+# --------------------------------------------------------------------------- #
+async def test_a_vm_up_without_crafty_does_not_advance_the_countdown(
+    service, crafty, clock, orchestrator
+):
+    """The case this guard exists for.
+
+    Starting the VM makes the host gate open, so requests are actually
+    attempted -- but if Crafty itself is not up, every one of them fails. The
+    countdown must freeze at what was observed rather than run on elapsed wall
+    time and shut down a server nobody ever confirmed was empty.
+    """
+    service.arm(SERVER_ID, 30, shutdown_vm=True)
+    await service._tick()
+    await elapse(service, clock, 5 * 60)
+    observed = service.get(SERVER_ID).idle_seconds
+    assert observed == pytest.approx(5 * 60)
+
+    # VM on, Crafty not answering: not CraftyHostOffline, a plain failure.
+    crafty.error = CraftyUnavailable()
+    await elapse(service, clock, 10 * 60 * 60)
+
+    state = service.get(SERVER_ID)
+    assert state.idle_seconds == observed
+    assert state.stalled is True
+    assert orchestrator.stops == []
+
+
+async def test_a_frozen_countdown_restarts_once_crafty_answers(
+    service, crafty, clock, orchestrator
+):
+    """The freeze is a blind spot, so the total it held cannot be trusted either."""
+    service.arm(SERVER_ID, 30, shutdown_vm=False)
+    await service._tick()
+    await elapse(service, clock, 25 * 60)
+
+    crafty.error = CraftyUnavailable()
+    await elapse(service, clock, 30 * 60)
+
+    crafty.error = None
+    await service._tick()
+    state = service.get(SERVER_ID)
+    assert state.stalled is False
+    assert state.idle_seconds == 0.0
+    assert orchestrator.stops == []
+
+    # A full idle period from the first trustworthy reading still fires.
+    await elapse(service, clock, 31 * 60)
+    assert orchestrator.stops == [(SERVER_ID, False, 0)]
+
+
+async def test_a_stalled_watcher_backs_off(service, crafty, clock):
+    """A Crafty that is not answering is not worth polling every minute."""
+    from bot.services.timeout import DORMANT_SLEEP, STALL_BACKOFF_AFTER
+
+    service.arm(SERVER_ID, 30, shutdown_vm=False)
+    await service._tick()
+    assert service._next_delay() <= service._config.timeout_check_interval
+
+    crafty.error = CraftyUnavailable()
+    for _ in range(STALL_BACKOFF_AFTER):
+        await service._tick()
+
+    assert service.get(SERVER_ID).failures >= STALL_BACKOFF_AFTER
+    assert service._next_delay() == DORMANT_SLEEP
+
+
+async def test_recovery_clears_the_stall(service, crafty, clock):
+    service.arm(SERVER_ID, 30, shutdown_vm=False)
+    crafty.error = CraftyUnavailable()
+    await service._tick()
+    assert service.get(SERVER_ID).stalled is True
+
+    crafty.error = None
+    await service._tick()
+    state = service.get(SERVER_ID)
+    assert state.stalled is False
+    assert state.failures == 0
+
+
+async def test_a_powered_off_vm_is_a_definite_answer_not_a_stall(service, crafty):
+    """CraftyHostOffline means "the VM is off", which is knowledge, not a blind spot."""
+    service.arm(SERVER_ID, 30, shutdown_vm=True)
+    crafty.error = CraftyHostOffline()
+    await service._tick()
+
+    state = service.get(SERVER_ID)
+    assert state.stalled is False
+    assert state.last_running is False
+    assert state.counting is False

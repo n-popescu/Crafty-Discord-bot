@@ -457,15 +457,17 @@ def armed(
     shutdown_vm: bool = True,
     online=None,
     running=None,
+    stalled: bool = False,
+    idle_seconds: float = 0.0,
 ):
-    import time
-
     return TimeoutState(
         server_id="a",
         minutes=minutes,
         shutdown_vm=shutdown_vm,
         armed_by=7,
-        empty_since=time.monotonic() if empty else None,
+        counting=empty,
+        idle_seconds=idle_seconds,
+        stalled=stalled,
         last_online=online,
         # `None` means the watcher has not checked yet; a player count implies
         # it has, and that the server was up.

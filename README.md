@@ -631,12 +631,13 @@ delay; clicking it while on cancels.
 
 The countdown runs **only while the server is up and has zero players**:
 
-| Server state | Countdown |
+| Situation | Countdown |
 | --- | --- |
 | Running, someone online | paused — any player at all counts as activity, however static the number is |
 | Running, nobody online | **counting** |
 | Stopped | paused — a stopped server is not idle, it is already stopped |
 | VM powered off | paused — waiting for the server to come back |
+| VM up but Crafty not answering | **frozen** — nothing is observed, so nothing is counted |
 
 It restarts from zero **every** time the server becomes empty again, so a
 server that fills up and empties out gets a fresh full delay rather than
@@ -652,11 +653,15 @@ What it does and does not do:
 * It **never kills** anything. Firing calls exactly the same
   `stop_minecraft` workflow as `/server stop`, so a timed shutdown and a manual
   one are the same shutdown, `AUTO_SHUTDOWN_DELAY` grace period included.
-* **Accrued idle time is only trusted while the watcher was actually watching.**
-  A failed check neither resets nor advances anything, but if the bot loses
-  sight of the server for more than a few check intervals, the count starts
-  again from the next reading. Otherwise a server that was busy during an
-  outage and emptied a minute ago would be shut down on a stale total.
+* **Idle time is measured, never assumed.** The countdown adds up the intervals
+  the watcher actually observed rather than reading elapsed wall time off a
+  start timestamp, so any period it could not see contributes nothing — a
+  stopped Crafty, a dropped network, or a VM that is up with nothing listening
+  on it. `/timeout` shows a frozen countdown as such.
+* **A blind spot invalidates the total, not just the gap.** If the watcher
+  loses sight of the server for more than a few check intervals, the count
+  restarts from the next good reading. Otherwise a server that was busy through
+  an outage and emptied a minute ago would be shut down on a stale total.
 * A shutdown only ever follows a **live** observation of a running, empty
   server, so an outage while people are playing can never stop the server
   underneath them.
@@ -676,8 +681,9 @@ watching while it was down, so it cannot claim the server stayed empty.
 Cost on a Pi Zero W: with nothing armed the watcher makes **no API calls at
 all**. With a timeout armed it makes one call every `TIMEOUT_CHECK_INTERVAL`
 seconds (60 s by default) while a server is up, and backs off to one every five
-minutes while every armed server is stopped — no countdown can start until one
-comes back, so there is nothing to watch closely.
+minutes while every armed server is stopped, or once Crafty has refused three
+checks in a row — in neither case can a countdown advance until something
+changes, so there is nothing to watch closely.
 
 `IDLE_SHUTDOWN_ENABLED=true` simply pre-arms this same switch for the default
 server at startup, using `IDLE_SHUTDOWN_MINUTES` and `AUTO_SHUTDOWN_VM`. There
@@ -914,6 +920,7 @@ structurally unable to touch a real service.
 | `/server history` is empty | Crafty records samples only while a server runs, and keeps about an hour. |
 | `/timeout` never fires | The countdown only runs while the server is **up** with zero players. `/timeout` says whether it is counting or paused, and why. |
 | `/timeout` reset itself | Expected after a long gap in checks (Crafty unreachable): idle time that was not actually observed is discarded, so the count starts again from the first good reading. |
+| `/timeout` says "frozen, Crafty is not responding" | The VM is up but Crafty is not answering — check `systemctl status crafty` on the VM. The countdown is held, not running, so nothing will be stopped until contact returns. |
 | An armed timeout disappeared after a restart | Check that `TIMEOUT_STATE_FILE` is writable by the bot's user; the state is saved next to it and a failed write is logged as a warning. |
 | `/timeout` armed but the VM stayed up | Either another Crafty server on that VM is still running, or the VM check failed — both leave the VM up on purpose. The log line says which. |
 | `/servers` shows fewer servers than expected | `/servers/status` only publishes servers with *Show status* enabled in Crafty. |
