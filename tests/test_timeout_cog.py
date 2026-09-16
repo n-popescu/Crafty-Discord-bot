@@ -15,6 +15,7 @@ import pytest
 
 from bot.client import CraftyBot
 from bot.config import PermissionConfig
+from bot.errors import CraftyHostOffline
 
 SERVER_ROLE = 10
 AZURE_ROLE = 20
@@ -49,12 +50,22 @@ class Run:
         self.embed = embed
 
 
-async def invoke(config, user, minutes=None, shutdown_vm=None) -> Run:
+async def invoke(
+    config, user, minutes=None, shutdown_vm=None, *, vm_off=False, prearm=None
+) -> Run:
     bot = CraftyBot(config)
     await bot.load_extension("bot.cogs.timeout")
     cog = bot.get_cog("TimeoutCog")
-    bot.crafty.resolve_server_id = AsyncMock(return_value="srv-1")
-    bot.crafty.list_servers = AsyncMock(return_value=())
+    if vm_off:
+        # Every Crafty call refuses before touching the network, exactly as it
+        # does while the Azure VM is deallocated.
+        bot.crafty.resolve_server_id = AsyncMock(side_effect=CraftyHostOffline())
+        bot.crafty.list_servers = AsyncMock(side_effect=CraftyHostOffline())
+    else:
+        bot.crafty.resolve_server_id = AsyncMock(return_value="srv-1")
+        bot.crafty.list_servers = AsyncMock(return_value=())
+    if prearm:
+        bot.timeouts.arm(prearm, 90, shutdown_vm=True, armed_by=user.id)
 
     interaction = MagicMock(spec=discord.Interaction)
     interaction.user = user
@@ -125,3 +136,63 @@ async def test_reading_the_state_needs_no_role(tiered_config):
     assert run.refused is False
     assert run.state is None
     assert "Auto-shutdown" in run.embed.title
+
+
+# --------------------------------------------------------------------------- #
+# A powered-off VM must not block a bot-local operation
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def offline_config(tiered_config):
+    """Crafty unreachable, but the default server is known from the config."""
+    return replace(
+        tiered_config,
+        crafty=replace(tiered_config.crafty, default_server_id="srv-1"),
+    )
+
+
+async def test_reading_the_timeout_works_while_the_vm_is_off(offline_config):
+    """Checking whether auto-shutdown is set is exactly what you do when it is off."""
+    run = await invoke(offline_config, member(1), vm_off=True)
+    assert run.refused is False
+    assert "Auto-shutdown" in run.embed.title
+    assert any("not contacted" in field.value for field in run.embed.fields)
+
+
+async def test_arming_works_while_the_vm_is_off(offline_config):
+    run = await invoke(
+        offline_config, member(3, (SERVER_ROLE, AZURE_ROLE)), minutes=90, vm_off=True
+    )
+    assert run.state is not None
+    assert run.state.minutes == 90
+
+
+async def test_cancelling_works_while_the_vm_is_off(offline_config):
+    user = member(3, (SERVER_ROLE, AZURE_ROLE))
+    run = await invoke(
+        offline_config, user, minutes=0, vm_off=True, prearm="srv-1"
+    )
+    assert run.state is None
+    assert "cancelled" in run.embed.title.lower()
+
+
+async def test_an_armed_timeout_identifies_the_server_without_crafty(tiered_config):
+    """No configured default, but one armed timeout says which server is meant."""
+    run = await invoke(tiered_config, member(1), vm_off=True, prearm="srv-9")
+    assert run.refused is False
+    assert "srv-9" in run.embed.title
+
+
+async def test_reading_with_nothing_to_go_on_still_answers(tiered_config):
+    """Unreachable, no default, nothing armed: report, never error."""
+    run = await invoke(tiered_config, member(1), vm_off=True)
+    assert run.refused is False
+    assert "No timeout is armed" in run.embed.description
+
+
+async def test_arming_with_nothing_to_go_on_asks_which_server(tiered_config):
+    """Arming genuinely needs a target, so this one is an honest error."""
+    run = await invoke(
+        tiered_config, member(3, (SERVER_ROLE, AZURE_ROLE)), minutes=90, vm_off=True
+    )
+    assert run.state is None
+    assert "Which server?" in run.embed.title

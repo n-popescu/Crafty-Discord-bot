@@ -18,7 +18,7 @@ from discord import app_commands
 
 from bot.client import CraftyBot
 from bot.cogs.base import ServiceCog, server_autocomplete
-from bot.errors import BotError
+from bot.errors import BotError, CraftyUnavailable
 from bot.permissions import Tier
 from bot.services.timeout import MAX_MINUTES
 from bot.ui import embeds
@@ -53,14 +53,19 @@ class TimeoutCog(ServiceCog):
         await interaction.response.defer()
 
         try:
-            server_id = await self.resolve(server)
-            name = await self.server_label(server_id)
+            server_id, live = await self._resolve_tolerant(server)
         except BotError as exc:
             await self._fail(interaction, exc)
             return
 
+        if server_id is None:
+            await self._unidentified(interaction, minutes)
+            return
+
+        name = await self.server_label(server_id)
+
         if minutes is None:
-            await self._show(interaction, server_id, name)
+            await self._show(interaction, server_id, name, live=live)
             return
 
         if minutes == 0:
@@ -129,17 +134,86 @@ class TimeoutCog(ServiceCog):
         embed.add_field(name="Current state", value=embeds.timeout_line(state), inline=False)
         await interaction.edit_original_response(embed=embed, view=None)
 
-    async def _show(
-        self, interaction: discord.Interaction, server_id: str, name: str
+    async def _resolve_tolerant(self, server: str | None) -> tuple[str | None, bool]:
+        """Resolve a server id without requiring a reachable Crafty.
+
+        Arming, cancelling and reading a timeout are bot-local operations, so
+        they have to keep working while the Azure VM -- and therefore Crafty --
+        is powered off. That is precisely when somebody wants to check whether
+        the auto-shutdown is still set.
+
+        Returns the id (or ``None`` when it cannot be determined) and whether it
+        came from a live Crafty lookup.
+        """
+        try:
+            return await self.resolve(server), True
+        except CraftyUnavailable:
+            # Covers CraftyHostOffline too. Every other Crafty error (unknown
+            # server, bad token) still propagates: those are real answers.
+            pass
+
+        explicit = (server or self.config.crafty.default_server_id or "").strip()
+        if explicit:
+            return explicit, False
+        armed = self.bot.timeouts.active()
+        if len(armed) == 1:
+            return armed[0].server_id, False
+        return None, False
+
+    async def _unidentified(
+        self, interaction: discord.Interaction, minutes: int | None
     ) -> None:
-        await interaction.edit_original_response(
-            embed=embeds.timeout_embed(
-                self.bot.timeouts.get(server_id),
-                name,
-                last_result=self.bot.timeouts.last_result,
+        """Crafty is unreachable and nothing says which server was meant."""
+        if minutes is not None:
+            await interaction.edit_original_response(
+                embed=embeds.error_embed(
+                    "Which server?",
+                    "Crafty is unreachable, so the server could not be looked up. "
+                    "Pass `server:` with a server ID, or set `CRAFTY_SERVER_ID` so "
+                    "the bot knows which one you mean while the VM is off.",
+                ),
+                view=None,
+            )
+            return
+
+        armed = self.bot.timeouts.active()
+        if not armed:
+            embed = embeds.timeout_embed(None, "this server")
+        else:
+            embed = embeds.armed_timeouts_embed(armed)
+        embed.add_field(
+            name="Note",
+            value=(
+                "Crafty is unreachable, so this is the bot's own record rather "
+                "than a live reading."
             ),
-            view=None,
+            inline=False,
         )
+        await interaction.edit_original_response(embed=embed, view=None)
+
+    async def _show(
+        self,
+        interaction: discord.Interaction,
+        server_id: str,
+        name: str,
+        *,
+        live: bool = True,
+    ) -> None:
+        embed = embeds.timeout_embed(
+            self.bot.timeouts.get(server_id),
+            name,
+            last_result=self.bot.timeouts.last_result,
+        )
+        if not live:
+            embed.add_field(
+                name="Note",
+                value=(
+                    "The Azure VM is off, so Crafty was not contacted. The "
+                    "countdown resumes when the server is running again."
+                ),
+                inline=False,
+            )
+        await interaction.edit_original_response(embed=embed, view=None)
 
     async def _fail(self, interaction: discord.Interaction, error: BotError) -> None:
         embed = embeds.error_embed("Timeout request failed", error.user_message)

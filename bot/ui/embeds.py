@@ -167,6 +167,18 @@ def timeout_line(state: TimeoutState | None) -> str:
     )
 
 
+def armed_timeouts_embed(states: Sequence[TimeoutState]) -> discord.Embed:
+    """Every armed timeout, for when the server in question is ambiguous."""
+    embed = _base(f"⏱️ Auto-shutdown — {len(states)} armed", COLOR_WARNING)
+    for state in states[:20]:
+        embed.add_field(
+            name=f"🎮 {state.server_id[:8]}",
+            value=timeout_line(state),
+            inline=False,
+        )
+    return embed
+
+
 def timeout_embed(
     state: TimeoutState | None, server_name: str, *, last_result: str = ""
 ) -> discord.Embed:
