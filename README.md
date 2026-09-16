@@ -309,12 +309,12 @@ sudo /opt/crafty-bot/deploy/update.sh
 ```
 
 ```
-==> Fetching origin/master
+==> Fetching origin/main
 ==> Updating 4105a18 -> 9f3c1d2
 9f3c1d2 Skip Crafty calls while the Azure VM is powered off
 ==> Installing dependencies into /opt/crafty-bot/.venv
 ==> Restarting crafty-bot
-==> Now running 9f3c1d2 on master.
+==> Now running 9f3c1d2 on main.
 ```
 
 It refuses to run if the checkout has local modifications (`.env` is ignored, so
