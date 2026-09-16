@@ -148,15 +148,9 @@ def timeout_line(state: TimeoutState | None) -> str:
 
     target = "server + VM" if state.shutdown_vm else "server"
     if not state.counting:
-        online = state.last_online
-        if online:
-            why = f"paused, {online} player{'s' if online != 1 else ''} online"
-        else:
-            # Armed, but the watcher has not made its first check yet.
-            why = "waiting for the first check"
         return (
             f"⏱️ Auto-shutdown **armed** — {state.minutes} min idle → stop {target}\n"
-            f"Countdown {why}"
+            f"Countdown {_paused_reason(state)}"
         )
 
     deadline = state.deadline_unix
@@ -177,6 +171,18 @@ def armed_timeouts_embed(states: Sequence[TimeoutState]) -> discord.Embed:
             inline=False,
         )
     return embed
+
+
+def _paused_reason(state: TimeoutState) -> str:
+    """Why an armed countdown is not currently running."""
+    if state.last_running is None:
+        # Armed, but the watcher has not made its first check yet.
+        return "waiting for the first check"
+    if not state.last_running:
+        # The countdown only measures an idle *running* server.
+        return "paused, the server is stopped"
+    online = state.last_online or 0
+    return f"paused, {online} player{'s' if online != 1 else ''} online"
 
 
 def timeout_embed(
@@ -212,15 +218,8 @@ def timeout_embed(
             inline=True,
         )
     else:
-        online = state.last_online
         embed.add_field(
-            name="Countdown",
-            value=(
-                f"Paused — {online} player(s) online"
-                if online
-                else "Paused — waiting for the first check"
-            ),
-            inline=True,
+            name="Countdown", value=_paused_reason(state).capitalize(), inline=True
         )
     embed.add_field(
         name="Also stops the VM", value="Yes" if state.shutdown_vm else "No", inline=True
@@ -229,7 +228,7 @@ def timeout_embed(
         embed.add_field(name="Armed by", value=f"<@{state.armed_by}>", inline=True)
     if last_result:
         embed.add_field(name="Last shutdown", value=last_result, inline=False)
-    embed.set_footer(text=f"{FOOTER} • disarm with /timeout minutes:0")
+    embed.set_footer(text=f"{FOOTER} • stays armed until /timeout minutes:0")
     return embed
 
 

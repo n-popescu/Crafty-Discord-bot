@@ -108,9 +108,9 @@ deploy/
   unless an administrator explicitly forces it.
 * **Inactivity auto-shutdown** — `/timeout 90`, or the **Auto-shutdown** switch
   under `/status`, stops the server gracefully through Crafty once it has been
-  empty for 90 minutes and then frees the Azure VM. Its state is shown wherever
-  it is relevant: `/status`, `/server status`, `/server players`, `/servers` and
-  `/health`.
+  up and empty for 90 minutes, then frees the Azure VM. It stays armed across
+  sessions, and its state is shown wherever it is relevant: `/status`,
+  `/server status`, `/server players`, `/servers` and `/health`.
 * **Live progress** — start/stop workflows update a single message step by step
   (`Azure VM → Crafty → Minecraft`) using exponential-backoff polling, never
   fixed sleeps.
@@ -151,7 +151,7 @@ deploy/
 | --- | --- | --- |
 | `/status [server]` | everyone | Full infrastructure overview with action buttons |
 | `/servers` | everyone | Every server Crafty publishes, in one API call |
-| `/timeout [minutes] [shutdown_vm] [server]` | everyone to read; server to arm (+azure for `shutdown_vm`) | Stop the server gracefully after N idle minutes, then free the VM. `minutes:0` cancels, no argument shows the state |
+| `/timeout [minutes] [shutdown_vm] [server]` | everyone to read; server to arm (+azure for `shutdown_vm`) | Stop the server gracefully after N minutes up-and-empty, then free the VM. Stays armed until `minutes:0` cancels it; no argument shows the state |
 | `/health` | everyone | Which layer is broken: bot, Crafty, Azure or Minecraft (ephemeral) |
 | `/server status [server]` | everyone | Detailed server statistics |
 | `/server players [server]` | everyone | Online players, with UUIDs when Crafty reports them |
@@ -629,30 +629,44 @@ The same switch sits under `/status` as an **Auto-shutdown: ON/OFF** button —
 green when armed. Clicking it while off opens a small dialog asking for the
 delay; clicking it while on cancels.
 
-What counts as inactivity:
+The countdown runs **only while the server is up and has zero players**:
 
-* **Zero players online.** Any player at all makes the server active, however
-  static the count is, so the countdown restarts the moment somebody joins and
-  starts again only once the last one leaves.
-* A **stopped** server counts as idle too — it is still keeping the VM billing.
+| Server state | Countdown |
+| --- | --- |
+| Running, someone online | paused — any player at all counts as activity, however static the number is |
+| Running, nobody online | **counting** |
+| Stopped | paused — a stopped server is not idle, it is already stopped |
+| VM powered off | paused — waiting for the server to come back |
+
+It restarts from zero **every** time the server becomes empty again, so a
+server that fills up and empties out gets a fresh full delay rather than
+inheriting whatever had accrued earlier.
+
+It is a **standing rule**, not a one-shot. Arming it once covers every session:
+after it fires, it stays armed and simply waits for the server to come back up
+and empty out again. Only `/timeout minutes:0` cancels it — nothing else does,
+including the VM being deallocated by other means.
 
 What it does and does not do:
 
 * It **never kills** anything. Firing calls exactly the same
   `stop_minecraft` workflow as `/server stop`, so a timed shutdown and a manual
   one are the same shutdown, `AUTO_SHUTDOWN_DELAY` grace period included.
-* A failed check (Crafty briefly unreachable) neither resets nor fires the
-  timer. A shutdown only ever follows a **live** observation of an empty server,
-  so an outage while players are online can never stop the server underneath
-  them.
-* If the VM is already powered off, the timeout retires quietly — there is
-  nothing left to shut down.
+* **Accrued idle time is only trusted while the watcher was actually watching.**
+  A failed check neither resets nor advances anything, but if the bot loses
+  sight of the server for more than a few check intervals, the count starts
+  again from the next reading. Otherwise a server that was busy during an
+  outage and emptied a minute ago would be shut down on a stale total.
+* A shutdown only ever follows a **live** observation of a running, empty
+  server, so an outage while people are playing can never stop the server
+  underneath them.
 * On a VM hosting **several** Crafty servers, an expired timer stops its own
   server but leaves the VM up while any other server is still running. If that
   check cannot be made, the VM is left up: an extra hour of compute is cheaper
   than an unannounced shutdown.
-* The timeout disarms itself once it fires, so a failed shutdown is not retried
-  on every tick. `/timeout` reports what happened.
+* A failed shutdown is not retried on the next tick — the countdown resets, so
+  it has to wait out the full idle period again. `/timeout` reports what
+  happened.
 
 Armed timeouts are written to `TIMEOUT_STATE_FILE` (`timeout_state.json` next to
 the bot) so a restart does not silently leave a VM billing overnight. The
@@ -661,8 +675,9 @@ watching while it was down, so it cannot claim the server stayed empty.
 
 Cost on a Pi Zero W: with nothing armed the watcher makes **no API calls at
 all**. With a timeout armed it makes one call every `TIMEOUT_CHECK_INTERVAL`
-seconds (60 s by default) — and not even that while the Azure VM is off, since
-every Crafty request is skipped in that state.
+seconds (60 s by default) while a server is up, and backs off to one every five
+minutes while every armed server is stopped — no countdown can start until one
+comes back, so there is nothing to watch closely.
 
 `IDLE_SHUTDOWN_ENABLED=true` simply pre-arms this same switch for the default
 server at startup, using `IDLE_SHUTDOWN_MINUTES` and `AUTO_SHUTDOWN_VM`. There
@@ -897,7 +912,8 @@ structurally unable to touch a real service.
 | `/server properties` or `/server roster` says not authorised | The API key lacks `FILES`. |
 | `/server roster` says a list does not exist yet | Minecraft only writes `whitelist.json`, `ops.json` and `banned-players.json` once the list is first used. |
 | `/server history` is empty | Crafty records samples only while a server runs, and keeps about an hour. |
-| `/timeout` never fires | The countdown only runs at zero players. Check `/timeout` — it says whether the countdown is running or paused, and why. |
+| `/timeout` never fires | The countdown only runs while the server is **up** with zero players. `/timeout` says whether it is counting or paused, and why. |
+| `/timeout` reset itself | Expected after a long gap in checks (Crafty unreachable): idle time that was not actually observed is discarded, so the count starts again from the first good reading. |
 | An armed timeout disappeared after a restart | Check that `TIMEOUT_STATE_FILE` is writable by the bot's user; the state is saved next to it and a failed write is logged as a warning. |
 | `/timeout` armed but the VM stayed up | Either another Crafty server on that VM is still running, or the VM check failed — both leave the VM up on purpose. The log line says which. |
 | `/servers` shows fewer servers than expected | `/servers/status` only publishes servers with *Show status* enabled in Crafty. |

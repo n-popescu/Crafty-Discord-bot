@@ -43,6 +43,19 @@ logger = logging.getLogger(__name__)
 #: :meth:`IdleTimeoutService.arm`, so this is only a safety net.
 IDLE_SLEEP = 300.0
 
+#: How many check intervals may pass between two observations before the
+#: accrued idle time is thrown away. Idle time is only trustworthy while the
+#: watcher was actually looking: across a longer blind spot the server could
+#: have been busy and emptied again, and firing on that stale total would shut
+#: down a server that filled and emptied a minute ago.
+OBSERVATION_GRACE = 3.0
+
+#: Sleep between checks while every armed server is known to be stopped. The
+#: countdown cannot start until one comes back up, so polling at full rate would
+#: just burn Azure and Crafty calls; noticing a restart a few minutes late only
+#: delays the *start* of a countdown measured in tens of minutes.
+DORMANT_SLEEP = 300.0
+
 #: Upper bound accepted for a timeout, in minutes (24 hours).
 MAX_MINUTES = 1440
 
@@ -62,6 +75,12 @@ class TimeoutState:
     empty_since: float | None = None
     #: Player count at the last check, for display.
     last_online: int | None = None
+    #: Whether the server was running at the last check. ``None`` means the
+    #: watcher has not looked yet.
+    last_running: bool | None = None
+    #: Monotonic timestamp of the last *successful* observation, used to tell
+    #: whether the accrued idle time was actually watched or merely assumed.
+    last_checked: float | None = None
 
     @property
     def limit_seconds(self) -> float:
@@ -249,6 +268,11 @@ class IdleTimeoutService:
         delay = IDLE_SLEEP
         if self._states:
             interval = float(self._config.timeout_check_interval)
+            # `last_running is None` means "not checked yet", which must not be
+            # mistaken for "stopped" -- a freshly armed timeout gets a prompt
+            # first check.
+            if all(state.last_running is False for state in self._states.values()):
+                interval = max(interval, DORMANT_SLEEP)
             remaining = [
                 state.remaining_seconds
                 for state in self._states.values()
@@ -274,13 +298,15 @@ class IdleTimeoutService:
             try:
                 await self._observe(state)
             except CraftyHostOffline:
-                # The VM is already off, so there is nothing left to shut down.
-                logger.info(
-                    "Idle timeout for server %s cancelled: the VM is already off",
-                    server_id,
-                )
-                self._states.pop(server_id, None)
-                self._persist()
+                # The VM is off, so the server is off: the countdown does not
+                # run. The timeout stays armed, ready for the next time the
+                # server comes up.
+                if state.counting:
+                    logger.debug(
+                        "Idle timeout for server %s paused: the VM is off", server_id
+                    )
+                state.empty_since = None
+                state.last_running = False
             except BotError as exc:
                 # A transient Crafty failure must not advance *or* reset the
                 # countdown: we simply do not know what the player count is.
@@ -294,32 +320,65 @@ class IdleTimeoutService:
         stats = await self._crafty.get_stats(
             state.server_id, ttl=self._config.status_cache_ttl
         )
+        now = time.monotonic()
         online = stats.online or 0
+        # Only a successful observation updates these; a failed check must not
+        # be mistaken for having seen the server.
+        gap = None if state.last_checked is None else now - state.last_checked
+        state.last_checked = now
         state.last_online = online
+        state.last_running = stats.running
 
+        # The countdown measures an idle *running* server. A stopped one is not
+        # idle, it is already stopped, so the timer neither runs nor fires --
+        # it simply waits for the server to come back up.
+        #
         # Any player at all counts as activity, however static the number is.
-        if stats.running and online > 0:
+        if not stats.running or online > 0:
             if state.counting:
                 logger.debug(
-                    "Idle timeout for server %s reset: %d player(s) online",
+                    "Idle timeout for server %s reset: %s",
                     state.server_id,
-                    online,
+                    f"{online} player(s) online" if stats.running else "server stopped",
                 )
             state.empty_since = None
             return
 
+        # The server is empty *now*. If we lost sight of it for longer than a
+        # few check intervals, start counting again from this observation
+        # instead of trusting a total that accrued while we were blind: the
+        # server may have been busy for most of it and emptied moments ago.
+        if state.counting and gap is not None and gap > self._observation_gap:
+            logger.info(
+                "Idle timeout for server %s restarted: no reading for %.0fs, so the "
+                "%.0fs of idle time already counted cannot be trusted",
+                state.server_id,
+                gap,
+                state.idle_seconds,
+            )
+            state.empty_since = None
+
         if state.empty_since is None:
-            state.empty_since = time.monotonic()
+            state.empty_since = now
             return
 
         if state.expired:
             await self._fire(state)
 
+    @property
+    def _observation_gap(self) -> float:
+        """How long a blind spot invalidates the accrued idle time."""
+        return max(self._config.timeout_check_interval * OBSERVATION_GRACE, 180.0)
+
     async def _fire(self, state: TimeoutState) -> None:
-        """Run the graceful stop workflow and disarm."""
-        # Disarm first: a shutdown that fails should not re-fire on every tick.
-        self._states.pop(state.server_id, None)
-        self._persist()
+        """Run the graceful stop workflow, keeping the timeout armed.
+
+        The timeout is a standing rule, not a one-shot: it stays armed until
+        somebody cancels it with ``/timeout minutes:0``. Only the countdown is
+        reset, which is also what stops a failed shutdown from re-firing on the
+        very next tick -- it has to go through the full idle period again.
+        """
+        state.empty_since = None
 
         shutdown_vm = state.shutdown_vm and self._orchestrator.azure_enabled
         if shutdown_vm and await self._other_servers_running(state.server_id):

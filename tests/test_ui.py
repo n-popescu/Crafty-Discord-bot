@@ -450,7 +450,14 @@ def test_uptime_offset_reaches_the_status_embed():
 # --------------------------------------------------------------------------- #
 # Inactivity timeout
 # --------------------------------------------------------------------------- #
-def armed(minutes: int = 90, *, empty: bool = False, shutdown_vm: bool = True, online=None):
+def armed(
+    minutes: int = 90,
+    *,
+    empty: bool = False,
+    shutdown_vm: bool = True,
+    online=None,
+    running=None,
+):
     import time
 
     return TimeoutState(
@@ -460,6 +467,9 @@ def armed(minutes: int = 90, *, empty: bool = False, shutdown_vm: bool = True, o
         armed_by=7,
         empty_since=time.monotonic() if empty else None,
         last_online=online,
+        # `None` means the watcher has not checked yet; a player count implies
+        # it has, and that the server was up.
+        last_running=running if running is not None else (None if online is None else True),
     )
 
 
@@ -478,6 +488,12 @@ def test_timeout_line_reports_a_paused_countdown():
     line = embeds.timeout_line(armed(90, online=3))
     assert "paused" in line
     assert "3 players online" in line
+
+
+def test_timeout_line_says_when_the_server_is_stopped():
+    """A stopped server does not count down, so say so rather than "0 players"."""
+    line = embeds.timeout_line(armed(90, online=0, running=False))
+    assert "the server is stopped" in line
 
 
 def test_timeout_line_says_when_nothing_has_been_checked_yet():
