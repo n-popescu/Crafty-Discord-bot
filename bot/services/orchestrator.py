@@ -101,10 +101,22 @@ class InfraOrchestrator:
         self._config = config
         self._crafty = crafty
         self._azure = azure
+        #: Called whenever a workflow confirms a server is running. Set after
+        #: construction (by ``CraftyBot``) rather than injected here, to avoid
+        #: a circular dependency: IdleTimeoutService itself depends on this
+        #: orchestrator. It exists so that watcher can react immediately to a
+        #: server starting instead of waiting out its own poll backoff --
+        #: which can be minutes long while every armed server is stopped, since
+        #: nothing else tells it a stopped server just came back up.
+        self.on_server_running: Callable[[], None] | None = None
 
     @property
     def azure_enabled(self) -> bool:
         return self._azure.enabled
+
+    def _notify_running(self) -> None:
+        if self.on_server_running is not None:
+            self.on_server_running()
 
     # ------------------------------------------------------------------ #
     # Read-only snapshot
@@ -174,6 +186,7 @@ class InfraOrchestrator:
             stats = await self._crafty.get_stats(resolved)
             if stats.running:
                 await workflow.mark("minecraft", StepState.DONE, "Already running")
+                self._notify_running()
                 return workflow
 
             await self._crafty.start_server(resolved)
@@ -188,6 +201,7 @@ class InfraOrchestrator:
                 await workflow.mark("minecraft", StepState.FAILED, "Timed out")
                 raise OperationTimeout("Minecraft did not report itself running in time.")
             await workflow.mark("minecraft", StepState.DONE, "Running")
+            self._notify_running()
             return workflow
         except BotError:
             await self._fail_active(workflow)
@@ -374,6 +388,7 @@ class InfraOrchestrator:
                 await workflow.mark("minecraft", StepState.FAILED, "Timed out")
                 raise OperationTimeout("Minecraft did not come back up in time.")
             await workflow.mark("minecraft", StepState.DONE, "Running")
+            self._notify_running()
             return workflow
         except BotError:
             await self._fail_active(workflow)

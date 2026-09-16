@@ -320,3 +320,76 @@ async def test_snapshot_survives_a_broken_azure(fast_config):
     assert snapshot.crafty_ok is True
     assert snapshot.azure_ok is False
     assert snapshot.stats is not None and snapshot.stats.running is True
+
+
+# --------------------------------------------------------------------------- #
+# on_server_running: lets IdleTimeoutService react to a server starting
+# --------------------------------------------------------------------------- #
+async def test_on_server_running_fires_after_a_fresh_start(fast_config):
+    """The bug this guards against.
+
+    IdleTimeoutService backs off to a multi-minute poll while every armed
+    server is stopped, since no countdown can start until one comes back up.
+    Nothing else tells it a server actually started -- that happens on this
+    completely separate code path -- so without this hook, a server started
+    while its timeout is armed could sit unnoticed well past a short test
+    delay.
+    """
+    crafty = FakeCrafty(running=False)
+    azure = FakeAzure(power_state=POWER_RUNNING)
+    orchestrator = build(fast_config, crafty, azure)
+
+    calls = []
+    orchestrator.on_server_running = lambda: calls.append(1)
+
+    await orchestrator.start_infrastructure()
+    assert calls == [1]
+
+
+async def test_on_server_running_fires_when_already_running(fast_config):
+    """The early-return path ('Already running') must notify too."""
+    crafty = FakeCrafty(running=True)
+    azure = FakeAzure(power_state=POWER_RUNNING)
+    orchestrator = build(fast_config, crafty, azure)
+
+    calls = []
+    orchestrator.on_server_running = lambda: calls.append(1)
+
+    await orchestrator.start_infrastructure()
+    assert calls == [1]
+
+
+async def test_on_server_running_fires_after_a_restart(fast_config):
+    crafty = FakeCrafty(running=True)
+    azure = FakeAzure(power_state=POWER_RUNNING)
+    orchestrator = build(fast_config, crafty, azure)
+
+    calls = []
+    orchestrator.on_server_running = lambda: calls.append(1)
+
+    await orchestrator.restart_minecraft()
+    assert calls == [1]
+
+
+async def test_on_server_running_does_not_fire_on_a_failed_start(fast_config):
+    crafty = FakeCrafty(running=False)
+    crafty.fail_with = CraftyUnavailable()
+    azure = FakeAzure(power_state=POWER_RUNNING)
+    orchestrator = build(fast_config, crafty, azure)
+
+    calls = []
+    orchestrator.on_server_running = lambda: calls.append(1)
+
+    with pytest.raises(CraftyUnavailable):
+        await orchestrator.start_infrastructure()
+    assert calls == []
+
+
+async def test_on_server_running_defaults_to_a_no_op(fast_config):
+    """Nothing crashes when nobody has wired the hook up."""
+    crafty = FakeCrafty(running=True)
+    azure = FakeAzure(power_state=POWER_RUNNING)
+    orchestrator = build(fast_config, crafty, azure)
+    assert orchestrator.on_server_running is None
+
+    await orchestrator.start_infrastructure()  # must not raise

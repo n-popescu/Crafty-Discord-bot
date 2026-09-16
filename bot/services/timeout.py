@@ -236,6 +236,21 @@ class IdleTimeoutService:
         logger.info("Idle timeout disarmed for server %s", server_id)
         return True
 
+    def wake(self) -> None:
+        """Force the next check to happen now instead of waiting out a backoff.
+
+        The watcher backs off to :data:`DORMANT_SLEEP` (five minutes by
+        default) while every armed server is stopped, since no countdown can
+        start until one comes back up. Nothing about that backoff itself
+        notices a server actually starting again -- that happens on a
+        completely separate code path (:class:`InfraOrchestrator`) the
+        watcher never talks to -- so without this, a server started while its
+        timeout is armed could sit unnoticed for up to five minutes, long
+        past a short test delay. ``CraftyBot`` wires this to
+        ``InfraOrchestrator.on_server_running``.
+        """
+        self._wake.set()
+
     # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #

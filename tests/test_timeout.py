@@ -820,3 +820,47 @@ async def test_firing_one_server_does_not_block_checking_another(config, crafty)
     # declines to deallocate the VM out from under it -- shutdown_vm is False
     # even though this timeout was armed with shutdown_vm=True.
     assert orchestrator.stops == [(SERVER_ID, False, 0)]
+
+
+# --------------------------------------------------------------------------- #
+# wake(): lets an external event (a server starting) cut short a backoff
+# --------------------------------------------------------------------------- #
+async def test_wake_interrupts_a_sleep_immediately(service):
+    """wake() must not require waiting out whatever delay was already chosen."""
+    task = asyncio.create_task(service._sleep_until_next_check())
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    service.wake()
+    await asyncio.wait_for(task, timeout=1.0)  # would hang if wake() did nothing
+
+
+async def test_a_server_starting_while_dormant_is_noticed_promptly(
+    service, crafty, clock, orchestrator
+):
+    """The exact bug reported: armed while stopped, then started, then nothing.
+
+    IdleTimeoutService backs off to DORMANT_SLEEP while every armed server is
+    stopped. Simulating that backoff and then calling wake() (as the
+    orchestrator hook does the moment a start succeeds) must make the very
+    next tick see the server running, rather than only noticing on whatever
+    tick the stale multi-minute backoff would eventually deliver.
+    """
+    from bot.services.timeout import DORMANT_SLEEP
+
+    service.arm(SERVER_ID, 1, shutdown_vm=False)
+    crafty.running = False
+    await service._tick()
+    assert service._next_delay() == DORMANT_SLEEP  # confirms the backoff kicked in
+
+    # The server starts; the orchestrator hook calls wake() at this point.
+    crafty.running = True
+    crafty.online = 0
+    service.wake()
+    await service._tick()
+
+    state = service.get(SERVER_ID)
+    assert state.last_running is True
+    assert state.counting is True
+    # And the backoff is gone now that the server is up.
+    assert service._next_delay() < DORMANT_SLEEP

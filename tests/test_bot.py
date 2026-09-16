@@ -322,3 +322,14 @@ async def test_pre_arming_without_a_configured_id_still_needs_a_live_lookup(conf
         assert bot.timeouts.active() == ()
     finally:
         await _close(bot)
+
+
+async def test_the_orchestrator_wakes_the_timeout_watcher_on_start(config):
+    """Wiring check: without this, a started server can sit unnoticed by the
+    idle-timeout watcher for up to DORMANT_SLEEP seconds (five minutes)."""
+    bot = CraftyBot(config)
+    try:
+        assert bot.orchestrator.on_server_running == bot.timeouts.wake
+    finally:
+        await bot.crafty.close()
+        await bot.azure.close()

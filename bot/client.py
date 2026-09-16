@@ -49,6 +49,13 @@ class CraftyBot(commands.Bot):
         )
         self.orchestrator = InfraOrchestrator(config, self.crafty, self.azure)
         self.timeouts = IdleTimeoutService(config, self.crafty, self.orchestrator)
+        # Wired after both exist (IdleTimeoutService itself depends on the
+        # orchestrator, so the orchestrator cannot take this dependency at
+        # construction time without a cycle). This is what lets the watcher
+        # notice a server starting immediately, rather than only on its own
+        # next poll -- which can be minutes away while every armed server is
+        # stopped.
+        self.orchestrator.on_server_running = self.timeouts.wake
         self.permissions = PermissionChecker(config.permissions, config.guild_id)
 
     # ------------------------------------------------------------------ #

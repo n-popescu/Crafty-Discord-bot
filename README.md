@@ -683,7 +683,13 @@ all**. With a timeout armed it makes one call every `TIMEOUT_CHECK_INTERVAL`
 seconds (60 s by default) while a server is up, and backs off to one every five
 minutes while every armed server is stopped, or once Crafty has refused three
 checks in a row — in neither case can a countdown advance until something
-changes, so there is nothing to watch closely.
+changes, so there is nothing to watch closely. That backoff is interrupted the
+moment any start (the `/status` panel's Start button, `/server start`,
+`/minecraft start` or a restart) confirms the server is running again, rather
+than leaving it to be noticed on whatever check the five-minute backoff would
+otherwise have delivered next -- otherwise a short test delay
+(`/timeout minutes:1`) could pass unnoticed several times over before the
+watcher even looked again.
 
 `IDLE_SHUTDOWN_ENABLED=true` simply pre-arms this same switch for the default
 server at startup, using `IDLE_SHUTDOWN_MINUTES` and `AUTO_SHUTDOWN_VM`. There
@@ -928,9 +934,11 @@ structurally unable to touch a real service.
 | `/timeout` says "frozen, Crafty is not responding" | The VM is up but Crafty is not answering — check `systemctl status crafty` on the VM. The countdown is held, not running, so nothing will be stopped until contact returns. |
 | An armed timeout disappeared after a restart | Check that `TIMEOUT_STATE_FILE` is writable by the bot's user; the state is saved next to it and a failed write is logged as a warning. |
 | `/timeout` armed but the VM stayed up | Either another Crafty server on that VM is still running, or the VM check failed — both leave the VM up on purpose. The log line says which. |
+| A server just started, but `/status` still shows "Countdown paused, the server is stopped" | Should update within a few seconds of the start completing (the orchestrator wakes the watcher immediately). If it stays stuck, the bot may need a restart — this reads from the background watcher's own last check, not a live one, so a wedged watcher shows stale state. |
 | `/servers` shows fewer servers than expected | `/servers/status` only publishes servers with *Show status* enabled in Crafty. |
 | Everything is slow on the Pi | Normal on first import; check `journalctl -u crafty-bot` and confirm `LOG_LEVEL=INFO`. |
 | Certificate or Azure token errors right after boot | The Pi Zero W has no clock. Check `timedatectl status`; the bot needs the time to be in sync. |
+| Uptime shows roughly the same wrong value every time the server starts | The Pi's clock and the Crafty host's clock are in different time zones and `CRAFTY_UTC_OFFSET` is not set, so the raw difference between them shows through as a fixed error. Compare `timedatectl` (or `date`) on both machines, set `CRAFTY_UTC_OFFSET` to the Crafty host's UTC offset in hours, and restart the bot. |
 | `pip` spends an hour compiling `aiohttp` | The virtualenv was created without `--system-site-packages`, so Debian's `python3-aiohttp` is invisible. Recreate it. |
 
 `LOG_LEVEL=DEBUG` logs request paths and status codes (never tokens).
